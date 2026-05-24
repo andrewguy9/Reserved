@@ -35,7 +35,7 @@ Devices:
   cuda:2  cuda  a6000    available: 49152/49152 MB  100/100 compute
 
 Reservations:
-  a3f9c2  pid=12345  label=train  age=2m14s
+  a3f9c2  label=train  age=2m14s
     cuda:1  8192 MB  50 compute
 ```
 
@@ -47,7 +47,7 @@ Reservations:
 from reserve import Reservation, DeviceConstraint
 
 with Reservation(DeviceConstraint("cuda", ram_mb=16384), label="train") as r:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(r.devices[0].device_index)
+    model.to(r.devices[0].torch_device())
     run_training()
 ```
 
@@ -60,10 +60,11 @@ Defines the set of physical devices on this machine. The daemon loads this at st
 ```json
 {
   "devices": [
-    { "name": "cuda:0", "type": "cuda", "model": "rtx3090", "ram_mb": 24576, "compute_units": 100 },
-    { "name": "cuda:1", "type": "cuda", "model": "rtx3090", "ram_mb": 24576, "compute_units": 100 },
-    { "name": "cuda:2", "type": "cuda", "model": "a6000",   "ram_mb": 49152, "compute_units": 100 },
-    { "name": "cpu",    "type": "cpu",                       "ram_mb": 65536 }
+    { "name": "cuda:0", "type": "cuda",  "model": "rtx3090",      "ram_mb": 24576, "compute_units": 100 },
+    { "name": "cuda:1", "type": "cuda",  "model": "rtx3090",      "ram_mb": 24576, "compute_units": 100 },
+    { "name": "cuda:2", "type": "cuda",  "model": "a6000",        "ram_mb": 49152, "compute_units": 100 },
+    { "name": "metal:0","type": "metal", "model": "m3-max",       "ram_mb": 36864, "compute_units": 100 },
+    { "name": "cpu",    "type": "cpu",                             "ram_mb": 65536 }
   ]
 }
 ```
@@ -71,8 +72,8 @@ Defines the set of physical devices on this machine. The daemon loads this at st
 Each device has:
 
 - `name` — unique identifier, returned in responses and set as `RESERVED_DEVICE`
-- `type` — `cuda` or `cpu`
-- `model` — optional human label for the hardware class (e.g. `rtx3090`, `a6000`).
+- `type` — `cuda`, `metal`, or `cpu`
+- `model` — optional human label for the hardware class (e.g. `rtx3090`, `a6000`, `m3-max`).
 
 Callers can filter on this to target specific hardware.
 
@@ -92,7 +93,7 @@ A reservation request specifies one or more **device constraints** — one per p
 
 | Constraint field | Effect |
 | --- | --- |
-| type | Device must be this type (cuda or cpu) |
+| type | Device must be this type (`cuda`, `metal`, or `cpu`) |
 | model | Device must have this model label |
 | ram_mb | Device must have at least this much available RAM |
 | compute_units | Device must have at least this many available compute units |
@@ -180,7 +181,6 @@ Line-delimited JSON over the UDS. Each message is one JSON object followed by `\
 ```json
 {
   "op": "reserve",
-  "pid": 12345,
   "label": "my-training-run",
   "devices": [
     { "type": "cuda", "model": "a6000", "ram_mb": 16384, "compute_units": 50 },
@@ -204,7 +204,7 @@ Each entry in `devices` is a constraint — all fields are optional. An empty ob
 }
 ```
 
-`devices` is parallel to the request `devices` array — `devices[i]` is the physical device assigned for constraint `i`. `device_index` is the remapped CUDA index for `CUDA_VISIBLE_DEVICES` (0-based, counting only CUDA devices in this reservation). Non-CUDA devices have `device_index: -1`.
+`devices` is parallel to the request `devices` array — `devices[i]` is the physical device assigned for constraint `i`. `device_index` is a remapped 0-based index within this reservation's CUDA devices (e.g. for use in `CUDA_VISIBLE_DEVICES`). Metal and CPU devices have `device_index: -1` — there is no index-based selection for those types.
 
 **Reserve response (failure):**
 
@@ -212,23 +212,6 @@ Each entry in `devices` is a constraint — all fields are optional. An empty ob
 {
   "ok": false,
   "error": "insufficient resources"
-}
-```
-
-**Release request:**
-
-```json
-{
-  "op": "release",
-  "reservation_id": "a3f9c2"
-}
-```
-
-**Release response:**
-
-```json
-{
-  "ok": true
 }
 ```
 
@@ -253,7 +236,6 @@ Each entry in `devices` is a constraint — all fields are optional. An empty ob
     {
       "id": "a3f9c2",
       "label": "my-training-run",
-      "pid": 12345,
       "created_at": 1748000000.0,
       "devices": [
         { "device_name": "cuda:2", "ram_mb": 16384, "compute_units": 50 },
@@ -284,24 +266,6 @@ daemon releases the reservation when that file descriptor is closed — whether 
 called `release`, the process exited, or it crashed. No PID tracking, no TTL polling,
 no platform-specific monitoring code.
 
-**File descriptor inheritance follows standard POSIX rules:**
-
-`fork()` duplicates all open file descriptors into the child. Both parent and child hold
-the reservation. The reservation lives until the last copy of the fd is closed — so a
-process that forks worker children can exit itself and the reservation stays alive until
-all workers finish.
-
-`exec()` behavior depends on the `O_CLOEXEC` flag. Python sets this by default on all
-sockets. `reserve` calls `os.set_inheritable(fd, True)` on the socket before exec so
-the child process inherits it. The exec'd program holds the reservation for its entire
-lifetime — including any children it forks — with no knowledge of `reserved`. It just
-runs with `CUDA_VISIBLE_DEVICES` already set.
-
-For programs that want to pass a reservation through their own exec boundary, the same
-pattern applies: call `os.set_inheritable(fd, True)` before exec and the child inherits
-the open socket. For deeply nested process trees where multiple workers each hold a copy
-of the fd, the reservation lives until the last one exits.
-
 **Connection lifecycle:**
 
 ```
@@ -321,6 +285,82 @@ connection is either a live lease (awaiting close) or a transient operation (sta
 - Queue or retry requests (callers decide when to retry).
 - Persist state across restarts.
 - Know anything about tasks, pipelines, or workers.
+
+---
+
+## Socket Semantics
+
+The open socket connection *is* the reservation. Application developers and SDK users should manage their reservations by reasoning about standard POSIX file descriptor semantics — no reserved-specific lifecycle API is needed beyond acquiring and releasing the initial connection.
+
+### fork()
+
+`fork()` duplicates all open file descriptors into the child. Both parent and child hold the reservation. The reservation lives until the last copy of the fd is closed — so a process that forks worker children can exit itself and the reservation stays alive until all workers finish. This is the correct model for a process pool or multiprocessing job: acquire once in the parent, fork workers, let the parent exit; the reservation outlives it.
+
+### exec()
+
+`exec()` behavior depends on the `O_CLOEXEC` flag on the socket fd. If the flag is set, the fd is closed at exec and the reservation is released at that point — not when the exec'd program exits. To transfer the lease across an exec boundary, `O_CLOEXEC` must be cleared before calling exec.
+
+**Python** sets `O_CLOEXEC` by default on all sockets. Clear it explicitly before exec:
+
+```python
+import os
+os.set_inheritable(sock.fileno(), True)
+os.execvp("child", ["child", ...])
+```
+
+**C/C++** does not set `O_CLOEXEC` by default. A socket created with `socket()` survives exec unless you opt out:
+
+```c
+// Default: fd survives exec — child inherits the reservation automatically
+int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+
+// Opt out: close on exec
+int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+// or after the fact:
+fcntl(fd, F_SETFD, FD_CLOEXEC);
+```
+
+When a reservation fd is inherited across exec, the exec'd program holds the lease for its entire lifetime — including any children it forks — with no knowledge of `reserved`. This is how the `reserve` CLI works: it acquires the reservation, clears `FD_CLOEXEC` on the lease fd, sets environment variables, and execs the target command. The reservation ends when CMD and all its descendants have closed the fd.
+
+### Passing a reservation through an exec boundary
+
+Any program can pass its reservation to a child process it execs by ensuring the fd is inheritable (clear `O_CLOEXEC` in Python; leave it unset in C). The child need not speak the `reserved` protocol — it simply holds an open fd. The reservation lives until the last copy is closed across the entire process tree.
+
+### Python SDK and reservation lifetime
+
+The Python SDK's `Reservation` context manager keeps the socket open for the lifetime of the `with` block. If the process forks inside the block, both parent and child hold the reservation. If the process calls `release()` or exits the `with` block in the parent, the child still holds a copy of the fd and the reservation remains live until the child closes it.
+
+```python
+with Reservation(DeviceConstraint("cuda", ram_mb=16384)) as r:
+    pid = os.fork()
+    if pid == 0:
+        # child: still holds the reservation via inherited fd
+        run_worker(r.devices[0])
+        os._exit(0)
+    # parent: reservation still live while child runs
+    os.waitpid(pid, 0)
+# both parent and child have exited — reservation released
+```
+
+To pass a reservation to an exec'd child from Python:
+
+```python
+with Reservation(DeviceConstraint("cuda")) as r:
+    os.set_inheritable(r._sock.fileno(), True)
+    os.execvp("worker", ["worker"])
+    # exec replaces this process; reservation held by worker until it exits
+```
+
+### Finding reservation owners
+
+The daemon has no way to verify which process holds a reservation — `pid` fields in requests are advisory only and not tracked. To find what process owns a given socket connection, use `lsof`:
+
+```bash
+# List all processes with an open connection to the daemon socket
+lsof /var/run/reserved.sock
+```
+
+Cross-reference the reservation IDs from `reserve-status` with socket file descriptors shown by `lsof` to identify the owning process.
 
 ---
 
@@ -345,6 +385,9 @@ All `--device` constraints are resolved atomically — all are granted or none a
 # Any CUDA device
 reserve --device cuda -- python infer.py
 
+# Metal device (Apple Silicon)
+reserve --device metal -- python infer.py
+
 # Needs 30GB VRAM (rules out 3090s)
 reserve --device cuda:ram=30720 -- python train.py
 
@@ -361,8 +404,9 @@ reserve --device cuda:model=a6000 --device cpu:ram=32768 -- python pipeline.py
 **What it does:**
 
 1. Asks the daemon for the requested devices.
-2. If the daemon rejects: prints an error to stderr and exits 1.
-3. If granted: sets environment variables, then replaces itself with CMD via `exec`.
+2. If the daemon is not running: prints an error to stderr and exits 2.
+3. If the daemon rejects (insufficient resources): prints an error to stderr and exits 1.
+4. If granted: sets environment variables, then replaces itself with CMD via `exec`.
 
 CMD runs directly — no wrapper process sitting around it.
 
@@ -370,14 +414,19 @@ CMD runs directly — no wrapper process sitting around it.
 
 | Variable | Value |
 | --- | --- |
-| CUDA_VISIBLE_DEVICES | Comma-separated remapped CUDA indices, e.g. 0 or 0,1 |
-| RESERVED_DEVICE | Physical name of the first granted CUDA device, e.g. cuda:2 |
+| CUDA_VISIBLE_DEVICES | Comma-separated remapped CUDA indices (CUDA devices only), e.g. `0` or `0,1` |
+| RESERVED_DEVICE | Physical name of the first granted accelerator device, e.g. `cuda:2` or `metal:0` |
 | RESERVED_DEVICES | Comma-separated physical names of all granted devices |
 | RESERVED_ID | Reservation ID (opaque string) |
+| RESERVED_FD | File descriptor number of the open lease socket, e.g. `3` |
 
-`CUDA_VISIBLE_DEVICES` is always remapped to start from 0 regardless of which physical GPUs were assigned. A process granted `cuda:2` and `cuda:3` sees them as `0` and `1`.
+`RESERVED_FD` is not needed by typical programs (they simply inherit the fd and hold the lease by staying alive). It is useful for wrapper scripts that need to explicitly close the fd early, debugging tools that want to identify the lease fd, or fd-preserving child launchers that need to pass it along.
 
-**Why `exec` instead of running CMD as a subprocess:**`exec` replaces `reserve` with CMD entirely. The socket connection drops immediately (closed by `exec`), releasing the reservation the moment CMD exits. No wrapper lingers.
+CUDA device indices are always remapped to start from 0 within this reservation regardless of which physical devices were assigned. A process granted `cuda:2` and `cuda:3` sees them as `CUDA_VISIBLE_DEVICES=0,1`.
+
+Metal does not have an equivalent device-selection environment variable — there is only one logical MPS device per system. `reserved` coordinates access to the Metal device via the reservation mechanism; the exec'd process selects it in code (e.g. `torch.device("mps")`).
+
+**Why `exec` instead of running CMD as a subprocess:** `exec` replaces `reserve` with CMD entirely — no wrapper process lingers waiting for CMD to finish. `reserve` clears `FD_CLOEXEC` on the lease fd before exec, so CMD inherits it and holds the lease for its own lifetime. The reservation ends when CMD (and any descendants) exit, not when `reserve` would have exited.
 
 ---
 
@@ -388,11 +437,17 @@ from reserve import Reservation, DeviceConstraint, ReservationError
 
 # Any CUDA device
 with Reservation(DeviceConstraint("cuda"), label="infer") as r:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(r.devices[0].device_index)
+    model.to(r.devices[0].torch_device())
+    run_model()
+
+# Metal device (Apple Silicon)
+with Reservation(DeviceConstraint("metal"), label="infer") as r:
+    model.to(r.devices[0].torch_device())   # torch.device("mps")
     run_model()
 
 # Needs 30GB VRAM — rules out 3090s
 with Reservation(DeviceConstraint("cuda", ram_mb=30720)) as r:
+    model.to(r.devices[0].torch_device())
     ...
 
 # Specifically a 3090 with partial capacity
@@ -405,50 +460,41 @@ with Reservation(
     DeviceConstraint("cuda"),
     label="distributed",
 ) as r:
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-        str(d.device_index) for d in r.devices if d.device_index >= 0
-    )
-    run_distributed()
+    devices = r.torch_devices()   # [torch.device("cuda:0"), torch.device("cuda:1")]
+    run_distributed(devices)
 
 # One A6000 + CPU RAM
 with Reservation(
     DeviceConstraint("cuda", model="a6000"),
     DeviceConstraint("cpu", ram_mb=32768),
 ) as r:
-    gpu = r.devices[0].device_name   # e.g. "cuda:2"
-    cpu = r.devices[1].device_name   # "cpu"
+    gpu, cpu = r.torch_devices()   # torch.device("cuda:0"), torch.device("cpu")
+    run_pipeline(gpu, cpu)
 
-# Non-context usage
-r = Reservation(DeviceConstraint("cuda", ram_mb=8192))
-r.acquire()   # raises ReservationError if unavailable
-try:
-    ...
-finally:
-    r.release()
 ```
 
 **`DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)`**
 
 All fields except `type` are optional. Omitting a field means unconstrained on that dimension. `type` may also be omitted entirely (pass `None`) to match any device type.
 
-**`Reservation` fields after `acquire()`:**
+**`Reservation` fields and methods after `acquire()`:**
 
 - `reservation_id: str`
 - `devices: list[GrantedDevice]` — parallel to the constraints passed at construction
+- `torch_devices() -> list[torch.device]` — returns a `torch.device` for each granted device, in constraint order. Convenience wrapper over `[d.torch_device() for d in self.devices]`.
 
-**`GrantedDevice` fields:**
+**`GrantedDevice` fields and methods:**
 
-- `device_name: str` — physical device name, e.g. `"cuda:2"`
-- `device_index: int` — remapped CUDA index (0-based within this reservation's CUDA
-
-devices). Non-CUDA devices have `device_index = -1`.
+- `device_name: str` — physical device name, e.g. `"cuda:2"` or `"metal:0"`
+- `device_index: int` — remapped 0-based CUDA device index for use with `CUDA_VISIBLE_DEVICES`. Metal and CPU devices have `device_index = -1`.
+- `torch_device() -> torch.device` — returns the appropriate `torch.device` for this grant: `torch.device("cuda:N")` for CUDA (using the remapped index), `torch.device("mps")` for Metal, `torch.device("cpu")` for CPU.
 
 **Errors:**
 
-- `ReservationError` — raised by `acquire()` when the daemon rejects the request.
-- `DaemonNotRunningError` — raised when the socket does not exist or connection refused.
+- `ReservationError` — raised on `__enter__` when the daemon rejects the request.
+- `DaemonNotRunningError` — raised when the socket does not exist or connection is refused.
 
-**Connection:**`acquire()` opens a connection to the daemon socket and keeps it open for the lifetime of the reservation. The open connection is the lease — the daemon releases the resource when the connection closes. `release()` / `__exit__` sends the release request and then closes the connection. If the process dies before calling `release()`, the kernel closes the socket and the daemon releases automatically.
+**Connection:** `acquire()` opens a connection to the daemon socket and keeps it open for the lifetime of the reservation. The open connection is the lease — the daemon releases the resource when the last copy of the fd is closed, whether by `release()` / `__exit__`, process exit, or crash. `release()` / `__exit__` simply closes the fd; no message is sent to the daemon. If the fd has been inherited by a forked child or passed across exec, closing it in the parent does not release the reservation — the child's copy keeps it alive.
 
 **SDK configuration** (in priority order):
 
@@ -476,7 +522,7 @@ Devices:
   cpu     cpu            available: 65536/65536 MB
 
 Reservations:
-  a3f9c2  pid=12345  label=encode  age=4m32s
+  a3f9c2  label=encode  age=4m32s
     cuda:0  8192 MB  50 compute
 ```
 
