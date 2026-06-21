@@ -104,6 +104,51 @@ meaning is a convention between the operator and callers.
 
 ---
 
+## Two Languages: Explicit and Constraint
+
+`reserved` uses two distinct languages for describing reservations, operating at different layers of the stack.
+
+### Explicit Language (daemon protocol)
+
+The daemon speaks only in explicit terms. Every slot in a reserve request names a specific device and states exactly how much capacity to claim:
+
+```
+slot: name=cuda:0  ram_mb=8192  compute_units=50
+slot: name=cuda:1  ram_mb=4096  compute_units=25
+```
+
+No wildcards. No type matching. The daemon does not search or infer — it checks whether the named device has sufficient available capacity and subtracts if so. This keeps the daemon simple, correct, and easy to test.
+
+### Constraint Language (SDK and CLI)
+
+Users and applications typically don't know or care which physical device they get — they just need a CUDA device with enough VRAM. The constraint language expresses this:
+
+```
+slot: type=cuda  ram_mb=8192
+slot: type=cuda  model=rtx3090
+slot: name=cuda:0  ram_mb=8192   # explicit pin is also valid constraint syntax
+```
+
+The constraint language is resolved by a **constraint solver** before the request is submitted to the daemon. The solver reads the current status, finds devices satisfying the constraints, and produces an explicit request.
+
+### Constraint Solvers
+
+A constraint solver is any function that takes a set of slot constraints and the current device status, and returns an explicit request. The SDK ships two:
+
+- **`FirstFitSolver`** — assigns each slot to the first device satisfying its constraints with sufficient capacity. Simple and predictable. The default for `Reservation` and the `reserve` CLI.
+- **`ConsolidateSolver`** — packs slots onto as few physical devices as possible. Good for co-location (e.g. checkpoint and LoRA on the same card to minimize cross-device transfers).
+- **`SpreadSolver`** — distributes slots across as many physical devices as possible. Good for maximizing parallel throughput (e.g. TTS actors spread across cards).
+
+Any caller can bypass SDK solvers entirely by submitting an explicit request directly to the daemon — this is what a sophisticated orchestrator does after running its own placement algorithm.
+
+```
+Constraint spec  →  Solver (reads status)  →  Explicit request  →  Daemon (check-and-subtract)
+```
+
+The daemon is unaware of solvers. New solvers can be added to the SDK or written by callers without any daemon changes.
+
+---
+
 ## Reservation Spec
 
 Requests follow a four-level hierarchy:
@@ -120,44 +165,44 @@ Request
 - **Slot** — one physical device within a reservation. A reservation can hold multiple slots; all slots are released when the reservation handle closes.
 - **Resource** — the capacity claimed on a slot's device (`ram_mb`, `compute_units`). Multiple slots can target the same physical device as long as combined capacity fits.
 
-**Constraint fields** (per slot):
+### Explicit slot fields (daemon protocol)
+
+The daemon only accepts explicit slot specifications. Every slot must name a specific device:
+
+| Field | Description |
+| --- | --- |
+| name | Required. Physical device name (e.g. `cuda:0`, `metal:0`, `cpu`) |
+| ram_mb | Amount of RAM to claim on this device |
+| compute_units | Number of compute units to claim on this device |
+
+### Constraint slot fields (SDK and CLI)
+
+The SDK and CLI accept constraint-based slot specifications, which a solver resolves to explicit assignments before submitting to the daemon:
 
 | Field | Effect |
 | --- | --- |
-| name | Pin to a specific device by name (e.g. `cuda:2`). Overrides type/model matching. |
 | type | Device must be this type (`cuda`, `metal`, or `cpu`) |
 | model | Device must have this model label |
 | ram_mb | Device must have at least this much available RAM |
 | compute_units | Device must have at least this many available compute units |
+| name | Pin directly to a named device, bypassing solver matching |
 
-Unspecified fields are unconstrained. The daemon picks any satisfying device. Use `name` to pin when your orchestrator has already decided placement.
-
-**Naive use — daemon picks placement:**
+**Constraint-based (SDK resolves before submitting):**
 
 ```
 # Single reservation, one slot: any CUDA device
 reservation(slot(type=cuda))
 
-# Single reservation, one slot: needs 30GB VRAM
-reservation(slot(type=cuda, ram_mb=30720))
-
-# Single reservation, two slots: distributed job, two GPUs released together
+# Single reservation, two slots: distributed job, released together
 reservation(slot(type=cuda), slot(type=cuda))
 
-# Single reservation, two slots: GPU + CPU released together
-reservation(slot(type=cuda, model=a6000), slot(type=cpu, ram_mb=32768))
-```
-
-**Multiple reservations — independent lifetimes:**
-
-```
-# Stable diffusion: checkpoint and LoRA acquired atomically, freed independently
+# Multiple reservations: stable diffusion, freed independently
 request(
   reservation("checkpoint", slot(type=cuda, ram_mb=8192)),
   reservation("lora",       slot(type=cuda, ram_mb=2048)),
 )
 
-# TTS pipeline: 5 actors acquired atomically, freed one by one as each finishes
+# Multiple reservations: TTS actors, freed one by one
 request(
   reservation("actor-1", slot(type=cuda, ram_mb=4096)),
   reservation("actor-2", slot(type=cuda, ram_mb=4096)),
@@ -167,18 +212,16 @@ request(
 )
 ```
 
-**Orchestrator-pinned placement:**
-
-When a sophisticated caller (e.g. a pipeline orchestrator) has already decided how to pack devices, it reads `status`, runs its own placement algorithm, and submits pinned slots using `name`. The daemon's solver is bypassed — it just does atomic check-and-subtract.
+**Explicit (orchestrator submits directly to daemon):**
 
 ```
-# Orchestrator has decided to consolidate onto cuda:0 for co-location with LLM stage
+# Orchestrator consolidates onto cuda:0 for co-location
 request(
   reservation("checkpoint", slot(name=cuda:0, ram_mb=8192)),
   reservation("lora",       slot(name=cuda:0, ram_mb=2048)),
 )
 
-# Orchestrator has decided to spread actors across two cards for throughput
+# Orchestrator spreads actors across two cards for throughput
 request(
   reservation("actor-1", slot(name=cuda:0, ram_mb=4096)),
   reservation("actor-2", slot(name=cuda:0, ram_mb=4096)),
@@ -188,7 +231,7 @@ request(
 )
 ```
 
-If a pinned request fails due to a race, the orchestrator re-reads status and re-plans. The daemon owns atomicity; the orchestrator owns strategy.
+If an explicit request fails due to a race, the orchestrator re-reads status and re-plans. The daemon owns atomicity; the orchestrator owns strategy.
 
 ---
 
@@ -255,20 +298,20 @@ A single request contains one or more reservations. Each reservation has a label
     {
       "label": "checkpoint",
       "slots": [
-        { "type": "cuda", "ram_mb": 8192 }
+        { "name": "cuda:2", "ram_mb": 8192, "compute_units": 50 }
       ]
     },
     {
       "label": "lora",
       "slots": [
-        { "type": "cuda", "ram_mb": 2048 }
+        { "name": "cuda:2", "ram_mb": 2048, "compute_units": 0 }
       ]
     }
   ]
 }
 ```
 
-All slot constraints across all reservations are resolved atomically. Slot constraint fields (`name`, `type`, `model`, `ram_mb`, `compute_units`) are all optional — omitted fields are unconstrained.
+The daemon protocol is fully explicit — every slot names a specific device. Constraint resolution (type, model matching) happens in the SDK or CLI before this request is submitted. All slots across all reservations are checked atomically.
 
 **Reserve response (success):**
 
@@ -353,10 +396,12 @@ No resources are changed. No fds are sent.
 
 ### Behavior on Reserve
 
-1. Collect all slot constraints across all reservations in the request. Resolve them atomically — earlier assignments reduce available capacity for later ones.
-2. If any slot constraint cannot be satisfied: respond `ok: false`, no resources are changed.
-3. If all slots are satisfied: record all reservations, subtract capacity from each assigned device, respond with the full assignment.
-4. Hold each reservation's resources until its lease socket is closed.
+All slots across all reservations are checked atomically. The daemon does no constraint solving — every slot names a specific device.
+
+1. For each slot, check that the named device exists and has sufficient available `ram_mb` and `compute_units`.
+2. If any slot cannot be satisfied: respond `ok: false`, no resources are changed.
+3. If all slots are satisfied: subtract capacity from each named device, record all reservations, respond with the assignments.
+4. Hold each reservation's resources until its lease socketpair fd is closed.
 
 ### Lease Lifetime and Connection Model
 
@@ -528,9 +573,9 @@ CMD runs directly — no wrapper process sitting around it.
 | RESERVED_DEVICE | Physical name of the first granted accelerator device, e.g. `cuda:2` or `metal:0` |
 | RESERVED_DEVICES | Comma-separated physical names of all granted devices |
 | RESERVED_ID | Reservation ID (opaque string) |
-| RESERVED_FD | File descriptor number of the open lease socket, e.g. `3` |
+| RESERVED_FD | File descriptor number of the lease socketpair end for this reservation, e.g. `3` |
 
-`RESERVED_FD` is not needed by typical programs (they simply inherit the fd and hold the lease by staying alive). It is useful for wrapper scripts that need to explicitly close the fd early, debugging tools that want to identify the lease fd, or fd-preserving child launchers that need to pass it along.
+`RESERVED_FD` is one fd regardless of how many slots were granted — slots share a reservation and a single lease fd. It is not needed by typical programs (they simply inherit the fd and hold the lease by staying alive). It is useful for wrapper scripts that need to explicitly close the fd early, debugging tools that want to identify the lease fd, or fd-preserving child launchers that need to pass it along.
 
 CUDA device indices are always remapped to start from 0 within this reservation regardless of which physical devices were assigned. A process granted `cuda:2` and `cuda:3` sees them as `CUDA_VISIBLE_DEVICES=0,1`.
 
