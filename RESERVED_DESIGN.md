@@ -298,7 +298,9 @@ The response contains one entry per reservation, each with its own `reservation_
 
 `slots` is parallel to the request `slots` array for that reservation. `device_index` is a remapped 0-based CUDA index scoped to this reservation (for use in `CUDA_VISIBLE_DEVICES`). Metal and CPU devices have `device_index: -1`.
 
-Each reservation requires its own lease fd. The daemon creates these fds and delivers them to the client via `SCM_RIGHTS` (Unix domain socket ancillary data) alongside the JSON response. The client receives N open file descriptors — one per reservation — in the same message as the grant. Each fd is a lease: the daemon watches it for closure and releases that reservation's resources when it closes. No follow-up messages or additional connections are needed.
+Each reservation requires its own lease fd. For each granted reservation the daemon creates a `socketpair()` — two connected ends. The daemon retains one end and sends the other to the client via `SCM_RIGHTS` (Unix domain socket ancillary data) alongside the JSON response. The client receives N file descriptors — one per reservation — in the same message as the grant.
+
+The daemon watches its end of each socketpair with `select`. When the client closes its end (explicit release, process exit, or crash), the daemon's end becomes readable with EOF — this is the release signal. No messages are exchanged over the lease fd; it exists solely as a close-detectable handle. The transport socket is closed after the exchange and plays no further role.
 
 **Reserve response (failure):**
 
@@ -632,7 +634,7 @@ req = Request(
 
 **`check()`**
 
-Call at natural checkpoints between units of work — between training epochs, between inference calls, between actor lines. Performs a non-blocking read on the lease fd. If the daemon has restarted (EOF), raises `ReservationExpiredError`. Returns immediately if healthy.
+Call at natural checkpoints between units of work — between training epochs, between inference calls, between actor lines. Performs a non-blocking read on the client's end of the lease socketpair. If the daemon has closed its end (restart or fatal error), the read returns EOF and `ReservationExpiredError` is raised. Returns immediately if the lease is healthy.
 
 ```python
 for epoch in range(num_epochs):
