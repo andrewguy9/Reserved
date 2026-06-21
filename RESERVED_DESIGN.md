@@ -5,7 +5,7 @@
 `reserved` is a single-machine, best-effort resource reservation system for physical hardware (GPUs, CPU, RAM). It succeeds or fails immediately — there is no queue.
 
 1. **Reservation system** — processes claim a slice of physical hardware capacity (device type, VRAM, compute budget). The daemon grants or rejects immediately.
-2. **Handle-based lifetime** — a reservation is an open Unix Domain Socket connection. When the process dies for any reason, the socket closes and resources are freed automatically. No cleanup code required.
+2. **Handle-based lifetime** — each reservation is backed by an open Unix Domain Socket connection. Multiple reservations can be acquired atomically in one request but released independently, each via its own socket. When a process dies for any reason, its sockets close and all held reservations are freed automatically. No cleanup code required.
 3. **Optional SDK** — a Python SDK provides a `Reservation` context manager for acquiring reservations and a `check()` method developers should call at natural checkpoints (between epochs, between inferences). If the daemon has restarted and the reservation is gone, `check()` raises `ReservationExpiredError` so the program can exit gracefully.
 4. **Daemon** — a lightweight process that holds the resource ledger in memory, grants/rejects reservation requests, and releases them when connections close. State is lost on restart.
 5. **Optional status API** — an HTTP endpoint and `reserve-status` CLI for operators to inspect current device capacity and active reservations.
@@ -17,7 +17,11 @@
 
 As GPU based AI applications become popular, our operating systems don't offer resource management tooling to help users run applications without interfering with each other. Reserved offers an opt-in mechanism for process resource coordination by "reserving" resources for a task, and then releasing them when finished.
 
-A reservation is a claim on a slice of hardware — a specific device model, an amount of VRAM, a compute budget. The daemon grants the claim if the hardware is available, or rejects it immediately if not. The claim is backed by an open Unix Domain Socket between the `reserved` daemon and the task program, so that in the event of a crash the resources are released. This also means that we can use normal socket semantics with fork/exec to allow non-reserved aware programs to leverage the same reservation system. The claim is held for exactly as long as the socket is held open. If the process dies for any reason, the socket is released automatically — no cleanup required.
+A reservation is a claim on a slice of hardware — a specific device, an amount of VRAM, a compute budget. The daemon grants the claim if the hardware is available, or rejects it immediately if not. Each reservation is backed by an open Unix Domain Socket; if the process dies for any reason, the socket closes and the resources are freed automatically — no cleanup required.
+
+Multiple reservations can be requested atomically in a single request (all granted or all rejected), but each carries its own socket handle and can be released independently. This allows callers to model independent resource lifetimes — a model checkpoint held for a session, LoRA weights freed after each inference — while still acquiring everything upfront in one atomic step.
+
+Normal POSIX socket semantics (fork/exec, fd inheritance) apply, making it straightforward to wrap non-reservation-aware programs in the reservation system.
 
 ---
 
@@ -100,40 +104,91 @@ meaning is a convention between the operator and callers.
 
 ---
 
-## Constraint-Based Matching
+## Reservation Spec
 
-A reservation request specifies one or more **device constraints** — one per physical device needed. Each constraint is a set of filters; the daemon finds a device satisfying all of them. Unspecified fields are unconstrained.
+Requests follow a four-level hierarchy:
 
-| Constraint field | Effect |
+```
+Request
+└── Reservation  (one per independent lifetime)
+    └── Slot     (one per physical device)
+        └── Resource  (capacity claimed on that device)
+```
+
+- **Request** — the atomic unit. All reservations in a request are granted together or the entire request is rejected. One wire message.
+- **Reservation** — a named grouping with its own handle (socket fd). Reservations within a request are granted atomically but released independently. The caller declares reservation boundaries explicitly based on intended lifetime — the daemon does not infer them.
+- **Slot** — one physical device within a reservation. A reservation can hold multiple slots; all slots are released when the reservation handle closes.
+- **Resource** — the capacity claimed on a slot's device (`ram_mb`, `compute_units`). Multiple slots can target the same physical device as long as combined capacity fits.
+
+**Constraint fields** (per slot):
+
+| Field | Effect |
 | --- | --- |
+| name | Pin to a specific device by name (e.g. `cuda:2`). Overrides type/model matching. |
 | type | Device must be this type (`cuda`, `metal`, or `cpu`) |
 | model | Device must have this model label |
 | ram_mb | Device must have at least this much available RAM |
 | compute_units | Device must have at least this many available compute units |
 
-All constraints in a request are resolved atomically — either every device constraint is satisfied simultaneously, or the whole request is rejected.
+Unspecified fields are unconstrained. The daemon picks any satisfying device. Use `name` to pin when your orchestrator has already decided placement.
 
-**Examples:**
+**Naive use — daemon picks placement:**
 
 ```
-# Any CUDA device, don't care which
-type=cuda
+# Single reservation, one slot: any CUDA device
+reservation(slot(type=cuda))
 
-# Needs 30GB VRAM — rules out 3090s (24GB), matches A6000 (48GB)
-type=cuda  ram_mb=30720
+# Single reservation, one slot: needs 30GB VRAM
+reservation(slot(type=cuda, ram_mb=30720))
 
-# Specifically a 3090, claim the whole thing
-type=cuda  model=rtx3090
+# Single reservation, two slots: distributed job, two GPUs released together
+reservation(slot(type=cuda), slot(type=cuda))
 
-# A 3090 with partial capacity
-type=cuda  model=rtx3090  ram_mb=8192  compute_units=30
-
-# Two CUDA devices of any kind (e.g. a distributed training job)
-[type=cuda, type=cuda]
-
-# One A6000 for training + one CPU allocation
-[type=cuda model=a6000, type=cpu ram_mb=32768]
+# Single reservation, two slots: GPU + CPU released together
+reservation(slot(type=cuda, model=a6000), slot(type=cpu, ram_mb=32768))
 ```
+
+**Multiple reservations — independent lifetimes:**
+
+```
+# Stable diffusion: checkpoint and LoRA acquired atomically, freed independently
+request(
+  reservation("checkpoint", slot(type=cuda, ram_mb=8192)),
+  reservation("lora",       slot(type=cuda, ram_mb=2048)),
+)
+
+# TTS pipeline: 5 actors acquired atomically, freed one by one as each finishes
+request(
+  reservation("actor-1", slot(type=cuda, ram_mb=4096)),
+  reservation("actor-2", slot(type=cuda, ram_mb=4096)),
+  reservation("actor-3", slot(type=cuda, ram_mb=4096)),
+  reservation("actor-4", slot(type=cuda, ram_mb=4096)),
+  reservation("actor-5", slot(type=cuda, ram_mb=4096)),
+)
+```
+
+**Orchestrator-pinned placement:**
+
+When a sophisticated caller (e.g. a pipeline orchestrator) has already decided how to pack devices, it reads `status`, runs its own placement algorithm, and submits pinned slots using `name`. The daemon's solver is bypassed — it just does atomic check-and-subtract.
+
+```
+# Orchestrator has decided to consolidate onto cuda:0 for co-location with LLM stage
+request(
+  reservation("checkpoint", slot(name=cuda:0, ram_mb=8192)),
+  reservation("lora",       slot(name=cuda:0, ram_mb=2048)),
+)
+
+# Orchestrator has decided to spread actors across two cards for throughput
+request(
+  reservation("actor-1", slot(name=cuda:0, ram_mb=4096)),
+  reservation("actor-2", slot(name=cuda:0, ram_mb=4096)),
+  reservation("actor-3", slot(name=cuda:1, ram_mb=4096)),
+  reservation("actor-4", slot(name=cuda:1, ram_mb=4096)),
+  reservation("actor-5", slot(name=cuda:1, ram_mb=4096)),
+)
+```
+
+If a pinned request fails due to a race, the orchestrator re-reads status and re-plans. The daemon owns atomicity; the orchestrator owns strategy.
 
 ---
 
@@ -191,33 +246,59 @@ Line-delimited JSON over the UDS. Each message is one JSON object followed by `\
 
 **Reserve request:**
 
+A single request contains one or more reservations. Each reservation has a label and one or more slots. Each slot is a device constraint.
+
 ```json
 {
   "op": "reserve",
-  "label": "my-training-run",
-  "devices": [
-    { "type": "cuda", "model": "a6000", "ram_mb": 16384, "compute_units": 50 },
-    { "type": "cpu",  "ram_mb": 32768 }
+  "reservations": [
+    {
+      "label": "checkpoint",
+      "slots": [
+        { "type": "cuda", "ram_mb": 8192 }
+      ]
+    },
+    {
+      "label": "lora",
+      "slots": [
+        { "type": "cuda", "ram_mb": 2048 }
+      ]
+    }
   ]
 }
 ```
 
-Each entry in `devices` is a constraint — all fields are optional. An empty object `{}` matches any device with any available capacity. All constraints are resolved atomically.
+All slot constraints across all reservations are resolved atomically. Slot constraint fields (`name`, `type`, `model`, `ram_mb`, `compute_units`) are all optional — omitted fields are unconstrained.
 
 **Reserve response (success):**
+
+The response contains one entry per reservation, each with its own `reservation_id` and assigned slots. `reservation_id` identifies the handle — closing the corresponding socket releases that reservation.
 
 ```json
 {
   "ok": true,
-  "reservation_id": "a3f9c2",
-  "devices": [
-    { "device_name": "cuda:2", "device_index": 0 },
-    { "device_name": "cpu",    "device_index": -1 }
+  "reservations": [
+    {
+      "reservation_id": "a3f9c2",
+      "label": "checkpoint",
+      "slots": [
+        { "device_name": "cuda:2", "device_index": 0 }
+      ]
+    },
+    {
+      "reservation_id": "b7e1d4",
+      "label": "lora",
+      "slots": [
+        { "device_name": "cuda:2", "device_index": 0 }
+      ]
+    }
   ]
 }
 ```
 
-`devices` is parallel to the request `devices` array — `devices[i]` is the physical device assigned for constraint `i`. `device_index` is a remapped 0-based index within this reservation's CUDA devices (e.g. for use in `CUDA_VISIBLE_DEVICES`). Metal and CPU devices have `device_index: -1` — there is no index-based selection for those types.
+`slots` is parallel to the request `slots` array for that reservation. `device_index` is a remapped 0-based CUDA index scoped to this reservation (for use in `CUDA_VISIBLE_DEVICES`). Metal and CPU devices have `device_index: -1`.
+
+Each reservation requires its own lease fd. The daemon creates these fds and delivers them to the client via `SCM_RIGHTS` (Unix domain socket ancillary data) alongside the JSON response. The client receives N open file descriptors — one per reservation — in the same message as the grant. Each fd is a lease: the daemon watches it for closure and releases that reservation's resources when it closes. No follow-up messages or additional connections are needed.
 
 **Reserve response (failure):**
 
@@ -227,6 +308,8 @@ Each entry in `devices` is a constraint — all fields are optional. An empty ob
   "error": "insufficient resources"
 }
 ```
+
+No resources are changed. No fds are sent.
 
 **Status request / response** (for introspection):
 
@@ -248,11 +331,18 @@ Each entry in `devices` is a constraint — all fields are optional. An empty ob
   "reservations": [
     {
       "id": "a3f9c2",
-      "label": "my-training-run",
+      "label": "checkpoint",
       "created_at": 1748000000.0,
-      "devices": [
-        { "device_name": "cuda:2", "ram_mb": 16384, "compute_units": 50 },
-        { "device_name": "cpu",    "ram_mb": 32768 }
+      "slots": [
+        { "device_name": "cuda:2", "ram_mb": 8192, "compute_units": 0 }
+      ]
+    },
+    {
+      "id": "b7e1d4",
+      "label": "lora",
+      "created_at": 1748000000.0,
+      "slots": [
+        { "device_name": "cuda:2", "ram_mb": 2048, "compute_units": 0 }
       ]
     }
   ]
@@ -261,37 +351,32 @@ Each entry in `devices` is a constraint — all fields are optional. An empty ob
 
 ### Behavior on Reserve
 
-1. For each constraint in the request, find a device satisfying all specified fields
-
-and having sufficient available capacity. All constraints are evaluated together — earlier assignments reduce available capacity for later ones.
-
-1. If any constraint cannot be satisfied: respond `ok: false`, no resources are changed.
-2. If all constraints are satisfied: record the reservation, subtract capacity from each
-
-assigned device, respond with the assignment list.
-
-1. Keep the client connection open. The open connection *is* the lease.
+1. Collect all slot constraints across all reservations in the request. Resolve them atomically — earlier assignments reduce available capacity for later ones.
+2. If any slot constraint cannot be satisfied: respond `ok: false`, no resources are changed.
+3. If all slots are satisfied: record all reservations, subtract capacity from each assigned device, respond with the full assignment.
+4. Hold each reservation's resources until its lease socket is closed.
 
 ### Lease Lifetime and Connection Model
 
-The reservation is represented by an open file descriptor to the daemon socket. The
-daemon releases the reservation when that file descriptor is closed — whether the client
-called `release`, the process exited, or it crashed. No PID tracking, no TTL polling,
-no platform-specific monitoring code.
+Each reservation is represented by a separate open socket connection. The daemon releases that reservation's resources when its socket closes — whether by explicit release, process exit, or crash. Multiple reservations from the same request have independent sockets and independent lifetimes.
 
 **Connection lifecycle:**
 
 ```
-client connects
-  → sends reserve request
-  → daemon responds (ok / error)
-  → [if ok] fd stays open — this is the lease
-  → reservation ends when all copies of the fd are closed
-     (explicit release, process exit, crash, or last forked worker exits)
+client opens a single transport socket, sends reserve request
+  → daemon resolves all slots atomically
+  → [if ok] daemon creates N lease fds (one per reservation)
+            sends JSON response + N fds via SCM_RIGHTS in one message
+  → client receives response and N fds
+  → client closes the transport socket (it was only needed for the request)
+  → each lease fd is held open independently — closing it releases that reservation
+  → reservation released when all copies of its fd are closed
+     (explicit release, process exit, crash, or last forked copy exits)
 ```
 
-The daemon multiplexes all open connections in a single thread using `select`. Each
-connection is either a live lease (awaiting close) or a transient operation (status).
+The transport socket is short-lived — connect, exchange one message, close. The lease fds are what the daemon watches. For a single-reservation request, one fd is returned. For N reservations, N fds are returned, each independently closeable.
+
+The daemon multiplexes all open lease fds in a single thread using `select`. Status requests arrive on their own short-lived connections and are handled inline.
 
 ### Daemon does NOT:
 
@@ -446,65 +531,98 @@ Metal does not have an equivalent device-selection environment variable — ther
 ## Python SDK
 
 ```python
-from reserve import Reservation, DeviceConstraint, ReservationError
+from reserve import Request, Reservation, DeviceConstraint, ReservationError
+```
 
+**Single reservation — use `Reservation` directly as a context manager:**
+
+```python
 # Any CUDA device
-with Reservation(DeviceConstraint("cuda"), label="infer") as r:
+with Reservation("infer", DeviceConstraint("cuda")) as r:
     model.to(r.devices[0].torch_device())
     run_model()
 
 # Metal device (Apple Silicon)
-with Reservation(DeviceConstraint("metal"), label="infer") as r:
+with Reservation("infer", DeviceConstraint("metal")) as r:
     model.to(r.devices[0].torch_device())   # torch.device("mps")
     run_model()
 
 # Needs 30GB VRAM — rules out 3090s
-with Reservation(DeviceConstraint("cuda", ram_mb=30720)) as r:
+with Reservation("infer", DeviceConstraint("cuda", ram_mb=30720)) as r:
     model.to(r.devices[0].torch_device())
     ...
 
-# Specifically a 3090 with partial capacity
-with Reservation(DeviceConstraint("cuda", model="rtx3090", ram_mb=8192, compute_units=30)) as r:
-    ...
-
-# Two CUDA devices, granted atomically
-with Reservation(
-    DeviceConstraint("cuda"),
-    DeviceConstraint("cuda"),
-    label="distributed",
-) as r:
+# Two CUDA devices in one reservation — released together
+with Reservation("distributed", DeviceConstraint("cuda"), DeviceConstraint("cuda")) as r:
     devices = r.torch_devices()   # [torch.device("cuda:0"), torch.device("cuda:1")]
     run_distributed(devices)
-
-# One A6000 + CPU RAM
-with Reservation(
-    DeviceConstraint("cuda", model="a6000"),
-    DeviceConstraint("cpu", ram_mb=32768),
-) as r:
-    gpu, cpu = r.torch_devices()   # torch.device("cuda:0"), torch.device("cpu")
-    run_pipeline(gpu, cpu)
-
 ```
 
-**`DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)`**
+**Multiple reservations — use `Request` for atomic acquire, independent release:**
 
-All fields except `type` are optional. Omitting a field means unconstrained on that dimension. `type` may also be omitted entirely (pass `None`) to match any device type.
+`Request.acquire()` returns a tuple of `Reservation` objects in the same order as declared. All are granted atomically or the call raises. Each is a context manager and can be released independently via `with` or `.release()`.
+
+```python
+# Stable diffusion: checkpoint held for the session, LoRA freed after each inference
+req = Request(
+    Reservation("checkpoint", DeviceConstraint("cuda", ram_mb=8192)),
+    Reservation("lora",       DeviceConstraint("cuda", ram_mb=2048)),
+)
+checkpoint, lora = req.acquire()
+
+with checkpoint:
+    load_checkpoint(checkpoint.devices[0].torch_device())
+    with lora:
+        load_lora(lora.devices[0].torch_device())
+        run_inference()
+    # lora released here, VRAM returned to pool
+# checkpoint released here
+
+# TTS pipeline: 5 actors acquired atomically, freed one by one as each finishes
+actors = Request(*[
+    Reservation(f"actor-{i}", DeviceConstraint("cuda", ram_mb=4096))
+    for i in range(5)
+]).acquire()
+
+for actor, line in zip(actors, script):
+    render(actor, line)
+    actor.release()   # frees this actor's VRAM immediately
+```
+
+**`Reservation(label, *constraints)`**
+
+Label is required and positional. One or more `DeviceConstraint` objects follow. All constraints in a single `Reservation` share the same lease fd and are released together.
+
+**`DeviceConstraint(type, *, name=None, model=None, ram_mb=0, compute_units=0)`**
+
+All fields except `type` are optional. Omitting a field means unconstrained on that dimension. `type` may also be omitted entirely (pass `None`) to match any device type. Pass `name` to pin to a specific device by name — useful when an orchestrator has already decided placement.
+
+```python
+# Orchestrator-pinned: consolidate onto cuda:0 for co-location
+req = Request(
+    Reservation("checkpoint", DeviceConstraint(name="cuda:0", ram_mb=8192)),
+    Reservation("lora",       DeviceConstraint(name="cuda:0", ram_mb=2048)),
+)
+```
 
 **`Reservation` fields and methods after `acquire()`:**
 
 - `reservation_id: str`
+- `label: str`
 - `devices: list[GrantedDevice]` — parallel to the constraints passed at construction
-- `torch_devices() -> list[torch.device]` — returns a `torch.device` for each granted device, in constraint order. Convenience wrapper over `[d.torch_device() for d in self.devices]`.
+- `torch_devices() -> list[torch.device]` — convenience wrapper over `[d.torch_device() for d in self.devices]`
+- `release()` — closes the lease fd, releasing all slots in this reservation
+- `check()` — see below
 
 **`GrantedDevice` fields and methods:**
 
 - `device_name: str` — physical device name, e.g. `"cuda:2"` or `"metal:0"`
-- `device_index: int` — remapped 0-based CUDA device index for use with `CUDA_VISIBLE_DEVICES`. Metal and CPU devices have `device_index = -1`.
-- `torch_device() -> torch.device` — returns the appropriate `torch.device` for this grant: `torch.device("cuda:N")` for CUDA (using the remapped index), `torch.device("mps")` for Metal, `torch.device("cpu")` for CPU.
+- `device_index: int` — remapped 0-based CUDA index scoped to this reservation. Metal and CPU devices have `device_index = -1`.
+- `torch_device() -> torch.device` — `torch.device("cuda:N")` for CUDA, `torch.device("mps")` for Metal, `torch.device("cpu")` for CPU.
 
 **`check()`**
 
-A best-practice method to call at natural checkpoints in long-running work — between training epochs, between inference calls, etc. Performs a non-blocking read on the lease socket. If the daemon has restarted (EOF), raises `ReservationExpiredError`. If the connection is healthy, returns immediately. The SDK cannot poll in the background, so this is the recommended pattern for detecting daemon restarts before committing to another unit of work.
+Call at natural checkpoints between units of work — between training epochs, between inference calls, between actor lines. Performs a non-blocking read on the lease fd. If the daemon has restarted (EOF), raises `ReservationExpiredError`. Returns immediately if healthy.
 
 ```python
 for epoch in range(num_epochs):
@@ -514,11 +632,11 @@ for epoch in range(num_epochs):
 
 **Errors:**
 
-- `ReservationError` — raised on `__enter__` when the daemon rejects the request.
-- `DaemonNotRunningError` — raised when the socket does not exist or connection is refused.
-- `ReservationExpiredError` — raised by `check()` when the lease socket has been closed by the daemon (e.g. daemon restarted). The program should treat this as a signal to exit or abort the current work.
+- `ReservationError` — raised by `acquire()` when the daemon rejects the request.
+- `DaemonNotRunningError` — raised when the daemon socket does not exist or connection is refused.
+- `ReservationExpiredError` — raised by `check()` when the lease fd has been closed by the daemon (daemon restarted). Treat as a signal to abort and exit.
 
-**Connection:** `acquire()` opens a connection to the daemon socket and keeps it open for the lifetime of the reservation. The open connection is the lease — the daemon releases the resource when the last copy of the fd is closed, whether by `release()` / `__exit__`, process exit, or crash. `release()` / `__exit__` simply closes the fd; no message is sent to the daemon. If the fd has been inherited by a forked child or passed across exec, closing it in the parent does not release the reservation — the child's copy keeps it alive.
+**Connection:** `acquire()` connects to the daemon, sends the reserve request, and receives back one lease fd per reservation via `SCM_RIGHTS`. The transport socket is then closed — the lease fds are what the daemon watches. `release()` / `__exit__` closes the lease fd; no message is sent. If the fd has been inherited by a forked child or passed across exec, closing it in the parent does not release the reservation — the child's copy keeps it alive.
 
 **SDK configuration** (in priority order):
 
@@ -544,15 +662,25 @@ Default output is human-readable text:
 
 ```
 Devices:
-  cuda:0  cuda  rtx3090  available: 16384/24576 MB  50/100 compute
-  cuda:1  cuda  rtx3090  available: 24576/24576 MB  100/100 compute
+  cuda:0  cuda  rtx3090  available:  8192/24576 MB  100/100 compute
+  cuda:1  cuda  rtx3090  available:  4096/24576 MB  100/100 compute
   cuda:2  cuda  a6000    available: 49152/49152 MB  100/100 compute
   cpu     cpu            available: 65536/65536 MB
 
 Reservations:
-  a3f9c2  label=encode  age=4m32s
-    cuda:0  8192 MB  50 compute
+  a3f9c2  label=actor-1  age=3m12s
+    cuda:0  4096 MB
+  b7e1d4  label=actor-2  age=3m12s
+    cuda:0  4096 MB
+  c2a8f1  label=actor-3  age=3m12s
+    cuda:0  4096 MB
+  d9b3e7  label=actor-4  age=3m12s
+    cuda:1  4096 MB
+  e4f6c9  label=actor-5  age=3m12s
+    cuda:1  4096 MB
 ```
+
+Three actors are packed onto `cuda:0`, two onto `cuda:1`. As each actor finishes its lines, its reservation is freed and that VRAM returns to the pool — the other actors are unaffected.
 
 With `--json`, prints the raw status JSON for use in scripts:
 
