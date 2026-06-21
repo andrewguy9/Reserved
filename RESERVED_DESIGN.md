@@ -38,7 +38,7 @@ Optionally serves an HTTP endpoint for monitoring (`--http PORT`).
 **`reserve`** — requests a reservation and execs a command under it. Sets `CUDA_VISIBLE_DEVICES` and other env vars before handing off to the command. The reservation is released when the command exits.
 
 ```bash
-reserve --device cuda:model=a6000 -- python train.py
+reserve train type=cuda,model=a6000 -- python train.py
 ```
 
 **`reserve-status`** — prints the current state of all devices and active reservations. Accepts `--json` for scripting.
@@ -464,39 +464,49 @@ Cross-reference the reservation IDs from `reserve-status` with socket file descr
 
 ## `reserve` CLI
 
-Acquires a reservation and runs a command under it.
+Acquires a single reservation and runs a command under it.
 
 ```
-reserve [options] -- CMD [ARGS...]
+reserve LABEL [SLOT ...] [--socket PATH] -- CMD [ARGS...]
+
+Arguments:
+  LABEL             Required. Human-readable name for this reservation (e.g. "train", "infer").
+                    Shown in reserve-status output and daemon logs.
+  SLOT              Device constraint for one physical slot. Comma-separated fields:
+                    type=TYPE, name=NAME, model=MODEL, ram=MB, compute=N.
+                    All fields optional. Repeat for multiple slots. Omit entirely for
+                    no device constraint.
 
 Options:
-  --device [TYPE][:model=MODEL][:ram=MB][:compute=N]
-                    Constraint for one physical device. Repeat for multiple devices.
-                    All fields are optional; unspecified fields are unconstrained.
-  --label LABEL     Human-readable label [default: reserve]
   --socket PATH     Daemon socket path [default: /var/run/reserved.sock]
 ```
 
-All `--device` constraints are resolved atomically — all are granted or none are.
+All slots belong to the single reservation and are granted atomically — all or none.
 
 ```bash
+# No device constraint
+reserve train -- python infer.py
+
 # Any CUDA device
-reserve --device cuda -- python infer.py
+reserve infer type=cuda -- python infer.py
 
 # Metal device (Apple Silicon)
-reserve --device metal -- python infer.py
+reserve infer type=metal -- python infer.py
 
 # Needs 30GB VRAM (rules out 3090s)
-reserve --device cuda:ram=30720 -- python train.py
+reserve train type=cuda,ram=30720 -- python train.py
 
 # Specifically a 3090
-reserve --device cuda:model=rtx3090 -- python infer.py
+reserve infer type=cuda,model=rtx3090 -- python infer.py
 
-# Two CUDA devices of any kind
-reserve --device cuda --device cuda -- python distributed.py
+# Pin to a specific device by name
+reserve infer name=cuda:2 -- python infer.py
 
-# One A6000 + CPU RAM
-reserve --device cuda:model=a6000 --device cpu:ram=32768 -- python pipeline.py
+# Two CUDA slots (distributed job)
+reserve distributed type=cuda type=cuda -- python distributed.py
+
+# One A6000 slot + one CPU slot
+reserve pipeline type=cuda,model=a6000 type=cpu,ram=32768 -- python pipeline.py
 ```
 
 **What it does:**
