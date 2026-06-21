@@ -802,3 +802,85 @@ Clients holding a reservation at the time of restart are left with a broken sock
 Python SDK users should call `r.check()` at natural checkpoints (between epochs, between inference calls). `check()` performs a non-blocking read; EOF means the daemon has restarted and the reservation is gone, and `ReservationExpiredError` is raised. Raw protocol users can detect this the same way: a non-blocking `recv()` returning 0 bytes signals EOF.
 
 The daemon logs all active reservations at shutdown (`SIGTERM`) so operators can see what work will be disrupted before restarting.
+
+---
+
+## Implementation Architecture
+
+### Module Structure
+
+```
+reserved/
+  core.py       # pure functions, no IO — the functional core
+  daemon.py     # imperative shell — owns the mutable ledger reference, drives the event loop
+  protocol.py   # JSON serialization/deserialization for the wire format
+  sdk/
+    client.py   # Reservation, Request, DeviceConstraint
+    errors.py   # ReservationError, DaemonNotRunningError, ReservationExpiredError
+```
+
+### Functional Core (`core.py`)
+
+All business logic lives here as pure functions. No IO, no sockets, no global state. Every function takes a `Ledger` and returns a new `Ledger` plus a result. The ledger is an immutable frozen dataclass — functions never mutate it, they produce a replacement.
+
+```python
+@dataclass(frozen=True)
+class Device:
+    name: str
+    type: str
+    model: str | None
+    ram_mb: int
+    compute_units: int
+
+@dataclass(frozen=True)
+class DeviceAvailability:
+    device: Device
+    available_ram_mb: int
+    available_compute_units: int
+
+@dataclass(frozen=True)
+class Ledger:
+    availability: tuple[DeviceAvailability, ...]
+    reservations: tuple[ActiveReservation, ...]
+
+def load_ledger(config: dict) -> Ledger: ...
+
+def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]: ...
+def release(ledger: Ledger, reservation_id: str) -> Ledger: ...
+def status(ledger: Ledger) -> StatusResult: ...
+```
+
+`grant()` resolves all slot constraints atomically. If any slot cannot be satisfied, it returns the original ledger unchanged and a failure result. If all slots are satisfied, it returns a new ledger with capacity subtracted and a success result containing the assignments.
+
+This design means the core is fully testable as plain function calls — no daemon, no sockets, no hardware required.
+
+```python
+# example test
+ledger = load_ledger({"devices": [{"name": "cuda:0", "type": "cuda", "ram_mb": 24576, ...}]})
+ledger2, result = grant(ledger, request)
+assert result.ok
+assert ledger2.availability[0].available_ram_mb == 24576 - 8192
+# original ledger is unchanged
+assert ledger.availability[0].available_ram_mb == 24576
+```
+
+### Imperative Shell (`daemon.py`)
+
+The shell owns the single mutable reference to the current ledger and drives the `select` loop. It calls core functions and swaps the ledger reference with the result.
+
+```python
+ledger: Ledger = core.load_ledger(config)
+
+# on reserve request received:
+ledger, result = core.grant(ledger, request)
+# send result + lease fds to client via SCM_RIGHTS
+
+# on lease fd closed (detected via select):
+ledger = core.release(ledger, reservation_id)
+
+# on status request:
+result = core.status(ledger)
+# send result to client
+```
+
+The shell contains no allocation logic — it only handles IO, fd lifecycle, and ledger swapping. Integration tests for the shell run a real daemon subprocess and connect to it over a real socket.
