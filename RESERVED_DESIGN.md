@@ -63,7 +63,7 @@ Reservations:
 ```python
 from reserve import Reservation, DeviceConstraint
 
-with Reservation(DeviceConstraint("cuda", ram_mb=16384), label="train") as r:
+with Reservation("train", DeviceConstraint("cuda", ram_mb=16384)) as r:
     model.to(r.devices[0].torch_device())
     run_training()
 ```
@@ -429,7 +429,7 @@ Any program can pass its reservation to a child process it execs by ensuring the
 The Python SDK's `Reservation` context manager keeps the socket open for the lifetime of the `with` block. If the process forks inside the block, both parent and child hold the reservation. If the process calls `release()` or exits the `with` block in the parent, the child still holds a copy of the fd and the reservation remains live until the child closes it.
 
 ```python
-with Reservation(DeviceConstraint("cuda", ram_mb=16384)) as r:
+with Reservation("worker", DeviceConstraint("cuda", ram_mb=16384)) as r:
     pid = os.fork()
     if pid == 0:
         # child: still holds the reservation via inherited fd
@@ -443,7 +443,7 @@ with Reservation(DeviceConstraint("cuda", ram_mb=16384)) as r:
 To pass a reservation to an exec'd child from Python:
 
 ```python
-with Reservation(DeviceConstraint("cuda")) as r:
+with Reservation("worker", DeviceConstraint("cuda")) as r:
     os.set_inheritable(r._sock.fileno(), True)
     os.execvp("worker", ["worker"])
     # exec replaces this process; reservation held by worker until it exits
