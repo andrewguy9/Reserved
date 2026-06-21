@@ -1,5 +1,18 @@
 # reserved — Resource Reservation Daemon
 
+## TLDR
+
+`reserved` is a single-machine, best-effort resource reservation system for physical hardware (GPUs, CPU, RAM). It succeeds or fails immediately — there is no queue.
+
+1. **Reservation system** — processes claim a slice of physical hardware capacity (device type, VRAM, compute budget). The daemon grants or rejects immediately.
+2. **Handle-based lifetime** — a reservation is an open Unix Domain Socket connection. When the process dies for any reason, the socket closes and resources are freed automatically. No cleanup code required.
+3. **Optional SDK** — a Python SDK provides a `Reservation` context manager for acquiring reservations and a `check()` method developers should call at natural checkpoints (between epochs, between inferences). If the daemon has restarted and the reservation is gone, `check()` raises `ReservationExpiredError` so the program can exit gracefully.
+4. **Daemon** — a lightweight process that holds the resource ledger in memory, grants/rejects reservation requests, and releases them when connections close. State is lost on restart.
+5. **Optional status API** — an HTTP endpoint and `reserve-status` CLI for operators to inspect current device capacity and active reservations.
+6. **Convenience wrapper** — a `reserve` shell script that wraps any non-reservation-aware program, acquiring a reservation and exec'ing the target command under it.
+
+---
+
 ## What is reserved?
 
 As GPU based AI applications become popular, our operating systems don't offer resource management tooling to help users run applications without interfering with each other. Reserved offers an opt-in mechanism for process resource coordination by "reserving" resources for a task, and then releasing them when finished.
@@ -489,10 +502,21 @@ All fields except `type` are optional. Omitting a field means unconstrained on t
 - `device_index: int` — remapped 0-based CUDA device index for use with `CUDA_VISIBLE_DEVICES`. Metal and CPU devices have `device_index = -1`.
 - `torch_device() -> torch.device` — returns the appropriate `torch.device` for this grant: `torch.device("cuda:N")` for CUDA (using the remapped index), `torch.device("mps")` for Metal, `torch.device("cpu")` for CPU.
 
+**`check()`**
+
+A best-practice method to call at natural checkpoints in long-running work — between training epochs, between inference calls, etc. Performs a non-blocking read on the lease socket. If the daemon has restarted (EOF), raises `ReservationExpiredError`. If the connection is healthy, returns immediately. The SDK cannot poll in the background, so this is the recommended pattern for detecting daemon restarts before committing to another unit of work.
+
+```python
+for epoch in range(num_epochs):
+    r.check()   # raises ReservationExpiredError if daemon restarted
+    train_epoch(model, data)
+```
+
 **Errors:**
 
 - `ReservationError` — raised on `__enter__` when the daemon rejects the request.
 - `DaemonNotRunningError` — raised when the socket does not exist or connection is refused.
+- `ReservationExpiredError` — raised by `check()` when the lease socket has been closed by the daemon (e.g. daemon restarted). The program should treat this as a signal to exit or abort the current work.
 
 **Connection:** `acquire()` opens a connection to the daemon socket and keeps it open for the lifetime of the reservation. The open connection is the lease — the daemon releases the resource when the last copy of the fd is closed, whether by `release()` / `__exit__`, process exit, or crash. `release()` / `__exit__` simply closes the fd; no message is sent to the daemon. If the fd has been inherited by a forked child or passed across exec, closing it in the parent does not release the reservation — the child's copy keeps it alive.
 
@@ -503,6 +527,10 @@ All fields except `type` are optional. Omitting a field means unconstrained on t
 3. Default: `/var/run/reserved.sock`
 
 ---
+
+## Status API
+
+The status API is optional operator tooling for inspecting device capacity and active reservations. It has two interfaces: a CLI for interactive use and scripting, and an HTTP endpoint for dashboards and monitoring systems.
 
 ## `reserve-status` CLI
 
@@ -641,8 +669,8 @@ The daemon binds the socket itself, sets group and permissions, and runs in the 
 
 When the daemon restarts, all open client connections are closed and the in-memory ledger is lost. There is no way to restore reservations — the connection *is* the reservation, and the connection is gone.
 
-Clients holding a reservation at the time of restart are left with a broken socket. They will not know their reservation was lost until they next attempt to write to it (at `release()` time), at which point they receive `EPIPE`.
+Clients holding a reservation at the time of restart are left with a broken socket. They will not know their reservation was lost until they next attempt to communicate with the daemon.
 
-Well-designed clients should periodically check that their reservation is still valid by attempting a read on the socket. A closed connection returns EOF immediately, signalling that the daemon has restarted and the reservation is gone. The client can then fail fast rather than continue using hardware it no longer holds.
+Python SDK users should call `r.check()` at natural checkpoints (between epochs, between inference calls). `check()` performs a non-blocking read; EOF means the daemon has restarted and the reservation is gone, and `ReservationExpiredError` is raised. Raw protocol users can detect this the same way: a non-blocking `recv()` returning 0 bytes signals EOF.
 
 The daemon logs all active reservations at shutdown (`SIGTERM`) so operators can see what work will be disrupted before restarting.
