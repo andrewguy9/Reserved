@@ -80,6 +80,29 @@ class TestLoadLedger:
         ledger = load_ledger(cfg)
         assert ledger.availability[0].device.model is None
 
+    def test_invalid_cuda_name_no_colon(self):
+        cfg = {"devices": [{"name": "cuda0", "type": "cuda", "ram_mb": 8192}]}
+        with pytest.raises(ValueError, match="cuda:N"):
+            load_ledger(cfg)
+
+    def test_invalid_cuda_name_non_integer_ordinal(self):
+        cfg = {"devices": [{"name": "cuda:gpu", "type": "cuda", "ram_mb": 8192}]}
+        with pytest.raises(ValueError, match="integer"):
+            load_ledger(cfg)
+
+    def test_invalid_cuda_name_negative_ordinal(self):
+        cfg = {"devices": [{"name": "cuda:-1", "type": "cuda", "ram_mb": 8192}]}
+        with pytest.raises(ValueError, match="non-negative"):
+            load_ledger(cfg)
+
+    def test_non_cuda_names_not_validated(self):
+        cfg = {"devices": [
+            {"name": "metal:0", "type": "metal", "ram_mb": 16384},
+            {"name": "cpu", "type": "cpu", "ram_mb": 32768},
+        ]}
+        ledger = load_ledger(cfg)
+        assert len(ledger.availability) == 2
+
     def test_device_with_no_compute_units(self):
         cfg = {"devices": [{"name": "cpu", "type": "cpu", "ram_mb": 32768}]}
         ledger = load_ledger(cfg)

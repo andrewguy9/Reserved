@@ -143,13 +143,36 @@ class StatusResult:
 # Functions
 # ---------------------------------------------------------------------------
 
+def _validate_device_name(name: str, device_type: str) -> None:
+    """Raise ValueError if a device name is invalid for its type."""
+    if device_type == "cuda":
+        parts = name.split(":")
+        if len(parts) != 2 or parts[0] != "cuda":
+            raise ValueError(
+                f"invalid CUDA device name {name!r}: must be 'cuda:N'"
+            )
+        try:
+            ordinal = int(parts[1])
+        except ValueError:
+            raise ValueError(
+                f"invalid CUDA device name {name!r}: ordinal must be an integer"
+            )
+        if ordinal < 0:
+            raise ValueError(
+                f"invalid CUDA device name {name!r}: ordinal must be non-negative"
+            )
+
+
 def load_ledger(config: dict) -> Ledger:
     """Build an initial Ledger from a config dict (parsed from reserved.json)."""
     devices = []
     for d in config.get("devices", []):
+        name = d["name"]
+        device_type = d["type"]
+        _validate_device_name(name, device_type)
         dev = Device(
-            name=d["name"],
-            type=d["type"],
+            name=name,
+            type=device_type,
             model=d.get("model"),
             ram_mb=d.get("ram_mb", 0),
             compute_units=d.get("compute_units", 0),
@@ -227,11 +250,8 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
             i = idx[slot.name]
             dev = avail[i].device
             if dev.type == "cuda":
-                # Extract physical ordinal from name e.g. "cuda:2" → 2
-                try:
-                    cuda_ordinal = int(slot.name.split(":")[1])
-                except (IndexError, ValueError):
-                    cuda_ordinal = -1
+                # Name is guaranteed valid by load_ledger validation.
+                cuda_ordinal = int(slot.name.split(":")[1])
             else:
                 cuda_ordinal = -1
             granted_slots.append(GrantedSlot(
