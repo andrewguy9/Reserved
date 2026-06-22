@@ -133,16 +133,19 @@ The constraint language is resolved by a **constraint solver** before the reques
 
 ### Constraint Solvers
 
-A constraint solver is any function that takes a set of slot constraints and the current device status, and returns an explicit request. The SDK ships three:
+A constraint solver is any function that takes a set of slot constraints and the current device status, and returns an explicit request. The SDK ships two:
 
-- **`FirstFitSolver`** — assigns each slot to the first device satisfying its constraints with sufficient capacity. Simple and predictable. The default for `Reservation` and the `reserve` CLI.
-- **`ConsolidateSolver`** — packs slots onto as few physical devices as possible. Good for co-location (e.g. checkpoint and LoRA on the same card to minimize cross-device transfers).
+- **`ConsolidateSolver`** — packs slots onto as few physical devices as possible. Leaves the maximum amount of contiguous free capacity for other workloads. Good for co-location (e.g. checkpoint and LoRA on the same card). **Default for `Reservation`, `Request`, and the `reserve` CLI.**
 - **`SpreadSolver`** — distributes slots across as many physical devices as possible. Good for maximizing parallel throughput (e.g. TTS actors spread across cards).
+
+Both solvers express clear user intent. The choice between them is a statement about how the caller wants to share the machine with other workloads.
 
 Any caller can bypass SDK solvers entirely by submitting an explicit request directly to the daemon — this is what a sophisticated orchestrator does after running its own placement algorithm.
 
 ```
 Constraint spec  →  Solver (reads status)  →  Explicit request  →  Daemon (check-and-subtract)
+                                                        ↑
+                                         Orchestrators enter here
 ```
 
 The daemon is unaware of solvers. New solvers can be added to the SDK or written by callers without any daemon changes.
@@ -525,6 +528,8 @@ Arguments:
                     no device constraint.
 
 Options:
+  --solver NAME     Constraint solver to use: consolidate (default) or spread.
+                    Ignored when all slots use name= (explicit placement).
   --socket PATH     Daemon socket path [default: /var/run/reserved.sock]
 ```
 
@@ -577,7 +582,9 @@ CMD runs directly — no wrapper process sitting around it.
 
 `RESERVED_FD` is one fd regardless of how many slots were granted — slots share a reservation and a single lease fd. It is not needed by typical programs (they simply inherit the fd and hold the lease by staying alive). It is useful for wrapper scripts that need to explicitly close the fd early, debugging tools that want to identify the lease fd, or fd-preserving child launchers that need to pass it along.
 
-CUDA device indices are always remapped to start from 0 within this reservation regardless of which physical devices were assigned. A process granted `cuda:2` and `cuda:3` sees them as `CUDA_VISIBLE_DEVICES=0,1`.
+`CUDA_VISIBLE_DEVICES` is an NVIDIA-defined environment variable that the CUDA runtime, PyTorch, and other frameworks read at startup to determine which physical GPUs are visible to the process. By setting it before exec, `reserve` hooks into this existing operator infrastructure — the exec'd process sees only the devices it was granted, indexed from 0, with no awareness of `reserved` or the physical device layout.
+
+For example, if the daemon grants `cuda:2`, `reserve` sets `CUDA_VISIBLE_DEVICES=0`. Inside the process, `torch.device("cuda:0")` correctly targets the physical `cuda:2` — the remapping is transparent. A process granted `cuda:2` and `cuda:3` sees `CUDA_VISIBLE_DEVICES=0,1`; `torch.device("cuda:1")` targets physical `cuda:3`.
 
 Metal does not have an equivalent device-selection environment variable — there is only one logical MPS device per system. `reserved` coordinates access to the Metal device via the reservation mechanism; the exec'd process selects it in code (e.g. `torch.device("mps")`).
 
@@ -646,21 +653,48 @@ for actor, line in zip(actors, script):
     actor.release()   # frees this actor's VRAM immediately
 ```
 
-**`Reservation(label, *constraints)`**
+**Two paths: constraint-based and explicit**
 
-Label is required and positional. One or more `DeviceConstraint` objects follow. All constraints in a single `Reservation` share the same lease fd and are released together.
+The SDK supports two entry points depending on how much control the caller needs:
 
-**`DeviceConstraint(type, *, name=None, model=None, ram_mb=0, compute_units=0)`**
-
-All fields except `type` are optional. Omitting a field means unconstrained on that dimension. `type` may also be omitted entirely (pass `None`) to match any device type. Pass `name` to pin to a specific device by name — useful when an orchestrator has already decided placement.
+**Constraint-based** — pass `DeviceConstraint` objects. The SDK runs a solver against current device status to produce an explicit assignment before submitting to the daemon. `ConsolidateSolver` is the default.
 
 ```python
-# Orchestrator-pinned: consolidate onto cuda:0 for co-location
-req = Request(
-    Reservation("checkpoint", DeviceConstraint(name="cuda:0", ram_mb=8192)),
-    Reservation("lora",       DeviceConstraint(name="cuda:0", ram_mb=2048)),
-)
+# Constraint-based: SDK picks the device
+with Reservation("infer", DeviceConstraint("cuda", ram_mb=8192)) as r:
+    ...
+
+# Constraint-based with explicit solver choice
+with Reservation("infer", DeviceConstraint("cuda", ram_mb=8192), solver=SpreadSolver()) as r:
+    ...
 ```
+
+**Explicit** — pass `ExplicitSlot` objects. The SDK submits directly to the daemon with no solver step. Use this when an orchestrator has already decided placement.
+
+```python
+# Explicit: orchestrator pins to cuda:0
+with Reservation("infer", ExplicitSlot("cuda:0", ram_mb=8192)) as r:
+    ...
+
+# Explicit multi-reservation: orchestrator controls packing
+req = Request(
+    Reservation("checkpoint", ExplicitSlot("cuda:0", ram_mb=8192)),
+    Reservation("lora",       ExplicitSlot("cuda:0", ram_mb=2048)),
+)
+checkpoint, lora = req.acquire()
+```
+
+**`Reservation(label, *slots, solver=ConsolidateSolver())`**
+
+Label is required and positional. Slots are either `DeviceConstraint` or `ExplicitSlot` objects — not mixed. All slots share the same lease fd and are released together. `solver` is ignored when slots are `ExplicitSlot`.
+
+**`DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)`**
+
+All fields except `type` are optional. `type` may be omitted (`None`) to match any device type.
+
+**`ExplicitSlot(name, *, ram_mb=0, compute_units=0)`**
+
+Names a specific physical device. No solver is involved — the request goes directly to the daemon.
 
 **`Reservation` fields and methods after `acquire()`:**
 
