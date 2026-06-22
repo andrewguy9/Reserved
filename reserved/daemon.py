@@ -442,15 +442,38 @@ class Daemon:
 # Socket acquisition
 # ---------------------------------------------------------------------------
 
+def _probe_socket(socket_path: str) -> str:
+    """
+    Check whether an existing socket file is live or stale.
+    Returns 'live', 'stale', or 'absent'.
+    """
+    try:
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(1.0)
+        probe.connect(socket_path)
+        probe.close()
+        return "live"
+    except FileNotFoundError:
+        return "absent"
+    except (ConnectionRefusedError, OSError):
+        return "stale"
+
+
 def _acquire_socket(socket_path: str, socket_group: str | None) -> socket.socket:
     """Create and bind the Unix domain listening socket."""
+    state = _probe_socket(socket_path)
+    if state == "live":
+        print(
+            f"error: another instance of reserved is already running at {socket_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if state == "stale":
+        logger.warning("removing stale socket at %s", socket_path)
+        os.unlink(socket_path)
+
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    # Remove stale socket file if it exists.
-    try:
-        os.unlink(socket_path)
-    except FileNotFoundError:
-        pass
     sock.bind(socket_path)
     os.chmod(socket_path, 0o660)
     if socket_group is not None:
@@ -473,6 +496,41 @@ def _acquire_socket_systemd() -> socket.socket:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _resolve_config(flag: str | None) -> str:
+    """Return the config file path using the documented fallback chain."""
+    candidates = [
+        flag,
+        os.environ.get("RESERVED_CONFIG"),
+        os.path.expanduser("~/.config/reserved/reserved.json"),
+        "/etc/reserved/reserved.json",
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    searched = [c for c in candidates if c]
+    print(
+        f"error: no config file found. Searched: {', '.join(searched)}\n"
+        "Pass --config PATH or set RESERVED_CONFIG.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _resolve_socket(flag: str | None) -> str:
+    """Return the socket path using the documented fallback chain."""
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+    candidates = [
+        flag,
+        os.environ.get("RESERVED_SOCKET"),
+        os.path.join(xdg_runtime, "reserved.sock") if xdg_runtime else None,
+        "/var/run/reserved.sock",
+    ]
+    for path in candidates:
+        if path:
+            return path
+    return "/var/run/reserved.sock"
+
+
 def main() -> None:
     import argparse
     import json as _json
@@ -481,12 +539,16 @@ def main() -> None:
         prog="reserved",
         description="Resource reservation daemon",
     )
-    parser.add_argument("--config", required=True, help="Path to reserved.json config file")
-    parser.add_argument(
-        "--socket",
-        default="/var/run/reserved.sock",
-        help="Unix domain socket path [default: /var/run/reserved.sock]",
-    )
+    parser.add_argument("--config", default=None, help=(
+        "Path to reserved.json config file. "
+        "Falls back to RESERVED_CONFIG env var, "
+        "~/.config/reserved/reserved.json, /etc/reserved/reserved.json."
+    ))
+    parser.add_argument("--socket", default=None, help=(
+        "Unix domain socket path. "
+        "Falls back to RESERVED_SOCKET env var, "
+        "$XDG_RUNTIME_DIR/reserved.sock, /var/run/reserved.sock."
+    ))
     parser.add_argument("--socket-group", default=None, help="Set socket file group")
     parser.add_argument("--http", type=int, default=None, metavar="PORT",
                         help="Start HTTP monitoring server on PORT")
@@ -499,15 +561,12 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    with open(args.config) as f:
+    config_path = _resolve_config(args.config)
+    with open(config_path) as f:
         config = _json.load(f)
 
     ledger = core.load_ledger(config)
-    logger.info(
-        "loaded %d device(s) from %s",
-        len(ledger.availability),
-        args.config,
-    )
+    logger.info("loaded %d device(s) from %s", len(ledger.availability), config_path)
 
     # Socket acquisition.
     listen_fd_env = os.environ.get("LISTEN_FDS")
@@ -515,16 +574,9 @@ def main() -> None:
         logger.info("using systemd socket activation (LISTEN_FDS=%s)", listen_fd_env)
         listen_sock = _acquire_socket_systemd()
     else:
-        listen_sock = _acquire_socket(args.socket, args.socket_group)
-        logger.info("bound socket at %s", args.socket)
-
-        # Write PID file alongside socket.
-        pid_path = args.socket + ".pid"
-        try:
-            with open(pid_path, "w") as pf:
-                pf.write(str(os.getpid()))
-        except OSError as exc:
-            logger.warning("could not write PID file %s: %s", pid_path, exc)
+        socket_path = _resolve_socket(args.socket)
+        listen_sock = _acquire_socket(socket_path, args.socket_group)
+        logger.info("bound socket at %s", socket_path)
 
     daemon = Daemon(ledger, listen_sock, http_port=args.http)
     daemon.run()
