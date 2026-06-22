@@ -5,7 +5,7 @@
 `reserved` is a single-machine, best-effort resource reservation system for physical hardware (GPUs, CPU, RAM). It succeeds or fails immediately — there is no queue.
 
 1. **Reservation system** — processes claim a slice of physical hardware capacity (device type, VRAM, compute budget). The daemon grants or rejects immediately.
-2. **Handle-based lifetime** — each reservation is backed by an open Unix Domain Socket connection. Multiple reservations can be acquired atomically in one request but released independently, each via its own socket. When a process dies for any reason, its sockets close and all held reservations are freed automatically. No cleanup code required.
+2. **Handle-based lifetime** — each reservation is backed by a lease fd (one end of a socketpair created by the daemon). Multiple reservations can be acquired atomically in one request but released independently, each via its own lease fd. When a process dies for any reason, its fds close and all held reservations are freed automatically. No cleanup code required.
 3. **Optional SDK** — a Python SDK provides a `Reservation` context manager for acquiring reservations and a `check()` method developers should call at natural checkpoints (between epochs, between inferences). If the daemon has restarted and the reservation is gone, `check()` raises `ReservationExpiredError` so the program can exit gracefully.
 4. **Daemon** — a lightweight process that holds the resource ledger in memory, grants/rejects reservation requests, and releases them when connections close. State is lost on restart.
 5. **Optional status API** — an HTTP endpoint and `reserve-status` CLI for operators to inspect current device capacity and active reservations.
@@ -17,7 +17,7 @@
 
 As GPU based AI applications become popular, our operating systems don't offer resource management tooling to help users run applications without interfering with each other. Reserved offers an opt-in mechanism for process resource coordination by "reserving" resources for a task, and then releasing them when finished.
 
-A reservation is a claim on a slice of hardware — a specific device, an amount of VRAM, a compute budget. The daemon grants the claim if the hardware is available, or rejects it immediately if not. Each reservation is backed by an open Unix Domain Socket; if the process dies for any reason, the socket closes and the resources are freed automatically — no cleanup required.
+A reservation is a claim on a slice of hardware — a specific device, an amount of VRAM, a compute budget. The daemon grants the claim if the hardware is available, or rejects it immediately if not. Each reservation is backed by a lease fd — one end of a socketpair created by the daemon at grant time. If the process dies for any reason, the fd closes and the resources are freed automatically — no cleanup required.
 
 Multiple reservations can be requested atomically in a single request (all granted or all rejected), but each carries its own socket handle and can be released independently. This allows callers to model independent resource lifetimes — a model checkpoint held for a session, LoRA weights freed after each inference — while still acquiring everything upfront in one atomic step.
 
@@ -133,7 +133,7 @@ The constraint language is resolved by a **constraint solver** before the reques
 
 ### Constraint Solvers
 
-A constraint solver is any function that takes a set of slot constraints and the current device status, and returns an explicit request. The SDK ships two:
+A constraint solver is any function that takes a set of slot constraints and the current device status, and returns an explicit request. The SDK ships three:
 
 - **`FirstFitSolver`** — assigns each slot to the first device satisfying its constraints with sufficient capacity. Simple and predictable. The default for `Reservation` and the `reserve` CLI.
 - **`ConsolidateSolver`** — packs slots onto as few physical devices as possible. Good for co-location (e.g. checkpoint and LoRA on the same card to minimize cross-device transfers).
@@ -498,14 +498,14 @@ with Reservation("worker", DeviceConstraint("cuda")) as r:
 
 ### Finding reservation owners
 
-The daemon has no way to verify which process holds a reservation — `pid` fields in requests are advisory only and not tracked. To find what process owns a given socket connection, use `lsof`:
+The daemon has no way to verify which process holds a reservation. Lease fds are socketpair ends held by the client process — they are not connections to the daemon socket and will not appear in `lsof /var/run/reserved.sock`. To find which process holds a lease fd, use `reserve-status --json` to get the reservation ID, then search for the fd numerically:
 
 ```bash
-# List all processes with an open connection to the daemon socket
-lsof /var/run/reserved.sock
+# Find all processes with an open fd matching the lease
+lsof -p <PID> | grep -i sock
 ```
 
-Cross-reference the reservation IDs from `reserve-status` with socket file descriptors shown by `lsof` to identify the owning process.
+Alternatively, cross-reference `reserve-status` reservation ages and labels with known process start times to identify the owner.
 
 ---
 
@@ -558,7 +558,7 @@ reserve pipeline type=cuda,model=a6000 type=cpu,ram=32768 -- python pipeline.py
 
 **What it does:**
 
-1. Asks the daemon for the requested devices.
+1. Runs the constraint solver against current device status to produce an explicit request, then submits it to the daemon.
 2. If the daemon is not running: prints an error to stderr and exits 2.
 3. If the daemon rejects (insufficient resources): prints an error to stderr and exits 1.
 4. If granted: sets environment variables, then replaces itself with CMD via `exec`.
@@ -697,7 +697,7 @@ for epoch in range(num_epochs):
 
 **SDK configuration** (in priority order):
 
-1. Constructor kwargs (`socket_path=`, `label=`)
+1. Constructor kwargs (`socket_path=`)
 2. Environment variable `RESERVED_SOCKET` for socket path
 3. Default: `/var/run/reserved.sock`
 
@@ -907,7 +907,7 @@ def release(ledger: Ledger, reservation_id: str) -> Ledger: ...
 def status(ledger: Ledger) -> StatusResult: ...
 ```
 
-`grant()` resolves all slot constraints atomically. If any slot cannot be satisfied, it returns the original ledger unchanged and a failure result. If all slots are satisfied, it returns a new ledger with capacity subtracted and a success result containing the assignments.
+`grant()` checks all explicit slot assignments atomically. If any named device lacks sufficient capacity, it returns the original ledger unchanged and a failure result. If all slots are satisfied, it returns a new ledger with capacity subtracted and a success result containing the assignments.
 
 This design means the core is fully testable as plain function calls — no daemon, no sockets, no hardware required.
 
