@@ -1,0 +1,9 @@
+{
+  "devices": [
+    { "name": "cuda:0", "type": "cuda",  "model": "rtx3090", "ram_mb": 24576, "compute_units": 100 },
+    { "name": "cuda:1", "type": "cuda",  "model": "rtx3090", "ram_mb": 24576, "compute_units": 100 },
+    { "name": "cuda:2", "type": "cuda",  "model": "a6000",   "ram_mb": 49152, "compute_units": 100 },
+    { "name": "metal:0","type": "metal", "model": "m3-max",  "ram_mb": 36864, "compute_units": 100 },
+    { "name": "cpu",    "type": "cpu",                        "ram_mb": 65536 }
+  ]
+}

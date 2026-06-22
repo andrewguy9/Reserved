@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "reserved"
+version = "0.1.0"
+description = "Single-machine best-effort resource reservation daemon for physical hardware"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+reserved = "reserved.daemon:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["reserved*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
