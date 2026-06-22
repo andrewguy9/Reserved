@@ -11,6 +11,8 @@ dependencies = []
 
 [project.scripts]
 reserved = "reserved.daemon:main"
+reserve = "reserved.bin.reserve:main"
+reserve-status = "reserved.bin.reserve_status:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
