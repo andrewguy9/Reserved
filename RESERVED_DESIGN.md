@@ -90,13 +90,25 @@ Each device has:
 
 - `name` — unique identifier, returned in responses and set as `RESERVED_DEVICE`
 - `type` — `cuda`, `metal`, or `cpu`
-- `model` — optional human label for the hardware class (e.g. `rtx3090`, `a6000`, `m3-max`).
+- `model` — optional human label for the hardware class (e.g. `rtx3090`, `a6000`, `m3-max`). Callers can filter on this to target specific hardware.
+- `ram_mb` — total reservable RAM. For CUDA devices this is VRAM; for Metal this is unified memory; for CPU this is system RAM. Multiple reservations can share a device as long as combined usage fits.
 
-Callers can filter on this to target specific hardware.
+**CUDA device naming:** must be `cuda:N` where N is a non-negative integer matching the physical GPU index (as reported by `nvidia-smi`). The daemon validates this at startup.
 
-- `ram_mb` — total reservable RAM. For CUDA devices this is VRAM; for CPU this is
+**Metal device naming:** Apple Silicon has a single unified GPU. Use `metal:0` by convention. There is no standard index-based selection for Metal — `reserved` coordinates access via the reservation mechanism; processes select the device in code with `torch.device("mps")`.
 
-system RAM. Multiple reservations can share a device as long as combined usage fits.
+A macOS config for an Apple Silicon machine:
+
+```json
+{
+  "devices": [
+    { "name": "metal:0", "type": "metal", "model": "m3-max", "ram_mb": 36864, "compute_units": 100 },
+    { "name": "cpu",     "type": "cpu",                       "ram_mb": 65536 }
+  ]
+}
+```
+
+- `ram_mb` — total reservable RAM. For CUDA devices this is VRAM; for CPU this is system RAM. Multiple reservations can share a device as long as combined usage fits.
 
 - `compute_units` — optional opaque token budget. No physical unit is implied; the
 

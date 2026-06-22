@@ -113,6 +113,61 @@ class TestLoadLedger:
         assert ledger.availability == ()
 
 
+METAL_CONFIG = {
+    "devices": [
+        {"name": "metal:0", "type": "metal", "model": "m3-max", "ram_mb": 36864, "compute_units": 100},
+        {"name": "cpu",     "type": "cpu",                       "ram_mb": 65536, "compute_units": 0},
+    ]
+}
+
+
+class TestMetalGrant:
+    def test_grant_metal_device(self):
+        ledger = load_ledger(METAL_CONFIG)
+        req = simple_request("infer", "metal:0", ram_mb=8192)
+        new_ledger, result = grant(ledger, req)
+        assert result.ok
+        assert result.reservations[0].slots[0].device_name == "metal:0"
+
+    def test_metal_cuda_ordinal_is_minus_one(self):
+        ledger = load_ledger(METAL_CONFIG)
+        req = simple_request("infer", "metal:0", ram_mb=8192)
+        _, result = grant(ledger, req)
+        assert result.reservations[0].slots[0].cuda_ordinal == -1
+
+    def test_metal_capacity_subtracted(self):
+        ledger = load_ledger(METAL_CONFIG)
+        req = simple_request("infer", "metal:0", ram_mb=8192)
+        new_ledger, result = grant(ledger, req)
+        metal_avail = next(
+            da for da in new_ledger.availability if da.device.name == "metal:0"
+        )
+        assert metal_avail.available_ram_mb == 36864 - 8192
+
+    def test_metal_and_cpu_same_request(self):
+        ledger = load_ledger(METAL_CONFIG)
+        req = ReserveRequest(reservations=(
+            ReservationRequest(label="pipeline", slots=(
+                SlotRequest(name="metal:0", ram_mb=8192),
+                SlotRequest(name="cpu", ram_mb=16384),
+            )),
+        ))
+        new_ledger, result = grant(ledger, req)
+        assert result.ok
+        assert len(result.reservations[0].slots) == 2
+
+    def test_metal_release(self):
+        ledger = load_ledger(METAL_CONFIG)
+        req = simple_request("infer", "metal:0", ram_mb=8192)
+        new_ledger, result = grant(ledger, req)
+        reservation_id = result.reservations[0].reservation_id
+        released_ledger = release(new_ledger, reservation_id)
+        metal_avail = next(
+            da for da in released_ledger.availability if da.device.name == "metal:0"
+        )
+        assert metal_avail.available_ram_mb == 36864
+
+
 # ---------------------------------------------------------------------------
 # grant — success cases
 # ---------------------------------------------------------------------------
