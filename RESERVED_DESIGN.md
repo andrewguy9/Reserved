@@ -898,16 +898,38 @@ The daemon logs all active reservations at shutdown (`SIGTERM`) so operators can
 
 ## Implementation Architecture
 
+### Language Boundaries
+
+The constraint language never crosses a process boundary. `DeviceConstraint`, `ExplicitSlot`, and solver classes are in-process Python objects only — they are never serialized. Only explicit requests hit the wire.
+
+The wire format is single-line JSON over the Unix domain socket. Each message is one JSON object terminated by `\n`. `protocol.py` owns all serialization and deserialization of explicit requests and responses. Constraint types never appear in `protocol.py`.
+
+```
+In-process (SDK):          DeviceConstraint → Solver → ExplicitRequest
+                                                              ↓
+Wire (protocol.py):                               single-line JSON \n
+                                                              ↓
+In-process (daemon):                              core.grant(ledger, request)
+```
+
+### Implementation Language
+
+All components — daemon, CLI tools, and SDK — are implemented in Python. The `reserve` and `reserve-status` CLIs are Python scripts installed as executables. Python is required for SCM_RIGHTS fd passing, socketpair management, and the constraint solver logic.
+
 ### Module Structure
 
 ```
 reserved/
   core.py       # pure functions, no IO — the functional core
   daemon.py     # imperative shell — owns the mutable ledger reference, drives the event loop
-  protocol.py   # JSON serialization/deserialization for the wire format
+  protocol.py   # serialization of explicit requests/responses to single-line JSON only
   sdk/
-    client.py   # Reservation, Request, DeviceConstraint
+    client.py   # Reservation, Request, DeviceConstraint, ExplicitSlot
+    solvers.py  # ConsolidateSolver, SpreadSolver
     errors.py   # ReservationError, DaemonNotRunningError, ReservationExpiredError
+  bin/
+    reserve     # CLI: constraint solver + exec wrapper
+    reserve-status  # CLI: status query
 ```
 
 ### Functional Core (`core.py`)
