@@ -133,17 +133,17 @@ class TestGrantSuccess:
         _, _ = grant(ledger, req)
         assert ledger.availability[0].available_ram_mb == original_ram
 
-    def test_cuda_device_index_in_response(self):
+    def test_cuda_ordinal_in_response(self):
         ledger = make_ledger()
         req = simple_request("infer", "cuda:2", ram_mb=4096)
         _, result = grant(ledger, req)
-        assert result.reservations[0].slots[0].device_index == 0
+        assert result.reservations[0].slots[0].cuda_ordinal == 2
 
-    def test_cpu_device_index_minus_one(self):
+    def test_cpu_cuda_ordinal_minus_one(self):
         ledger = make_ledger()
         req = simple_request("cpu-job", "cpu", ram_mb=1024)
         _, result = grant(ledger, req)
-        assert result.reservations[0].slots[0].device_index == -1
+        assert result.reservations[0].slots[0].cuda_ordinal == -1
 
     def test_reservation_id_is_unique(self):
         ledger = make_ledger()
@@ -336,9 +336,9 @@ class TestGrantAtomic:
         new_ledger, result = grant(ledger, req)
         assert result.ok
         assert len(result.reservations[0].slots) == 2
-        # device_index should be 0 for first CUDA slot, 1 for second.
-        assert result.reservations[0].slots[0].device_index == 0
-        assert result.reservations[0].slots[1].device_index == 1
+        # cuda_ordinal should be the physical ordinal from the device name.
+        assert result.reservations[0].slots[0].cuda_ordinal == 0
+        assert result.reservations[0].slots[1].cuda_ordinal == 1
 
 
 # ---------------------------------------------------------------------------

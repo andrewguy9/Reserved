@@ -328,21 +328,21 @@ The response contains one entry per reservation, each with its own `reservation_
       "reservation_id": "a3f9c2",
       "label": "checkpoint",
       "slots": [
-        { "device_name": "cuda:2", "device_index": 0 }
+        { "device_name": "cuda:2", "cuda_ordinal": 2 }
       ]
     },
     {
       "reservation_id": "b7e1d4",
       "label": "lora",
       "slots": [
-        { "device_name": "cuda:2", "device_index": 0 }
+        { "device_name": "cuda:2", "cuda_ordinal": 2 }
       ]
     }
   ]
 }
 ```
 
-`slots` is parallel to the request `slots` array for that reservation. `device_index` is a remapped 0-based CUDA index scoped to this reservation (for use in `CUDA_VISIBLE_DEVICES`). Metal and CPU devices have `device_index: -1`.
+`slots` is parallel to the request `slots` array for that reservation. `cuda_ordinal` is the physical CUDA ordinal extracted from the device name (e.g. `cuda:2` → `2`). It is set directly in `CUDA_VISIBLE_DEVICES`; the child process then addresses the device as `cuda:0`, `cuda:1`, etc. (logical indices within what `CUDA_VISIBLE_DEVICES` exposes). Metal and CPU devices have `cuda_ordinal: -1`.
 
 Each reservation requires its own lease fd. For each granted reservation the daemon creates a `socketpair()` — two connected ends. The daemon retains one end and sends the other to the client via `SCM_RIGHTS` (Unix domain socket ancillary data) alongside the JSON response. The client receives N file descriptors — one per reservation — in the same message as the grant.
 
@@ -574,7 +574,7 @@ CMD runs directly — no wrapper process sitting around it.
 
 | Variable | Value |
 | --- | --- |
-| CUDA_VISIBLE_DEVICES | Comma-separated remapped CUDA indices (CUDA devices only), e.g. `0` or `0,1` |
+| CUDA_VISIBLE_DEVICES | Comma-separated physical CUDA ordinals of granted devices, e.g. `2` or `2,3` |
 | RESERVED_DEVICE | Physical name of the first granted accelerator device, e.g. `cuda:2` or `metal:0` |
 | RESERVED_DEVICES | Comma-separated physical names of all granted devices |
 | RESERVED_ID | Reservation ID (opaque string) |
@@ -582,9 +582,13 @@ CMD runs directly — no wrapper process sitting around it.
 
 `RESERVED_FD` is one fd regardless of how many slots were granted — slots share a reservation and a single lease fd. It is not needed by typical programs (they simply inherit the fd and hold the lease by staying alive). It is useful for wrapper scripts that need to explicitly close the fd early, debugging tools that want to identify the lease fd, or fd-preserving child launchers that need to pass it along.
 
-`CUDA_VISIBLE_DEVICES` is an NVIDIA-defined environment variable that the CUDA runtime, PyTorch, and other frameworks read at startup to determine which physical GPUs are visible to the process. By setting it before exec, `reserve` hooks into this existing operator infrastructure — the exec'd process sees only the devices it was granted, indexed from 0, with no awareness of `reserved` or the physical device layout.
+`CUDA_VISIBLE_DEVICES` is an NVIDIA-defined environment variable that the CUDA runtime, PyTorch, and other frameworks read at startup to determine which physical GPUs are visible to the process. By setting it before exec, `reserve` hooks into this existing operator infrastructure — the exec'd process sees only the devices it was granted, with no awareness of `reserved` or the full physical device layout.
 
-For example, if the daemon grants `cuda:2`, `reserve` sets `CUDA_VISIBLE_DEVICES=0`. Inside the process, `torch.device("cuda:0")` correctly targets the physical `cuda:2` — the remapping is transparent. A process granted `cuda:2` and `cuda:3` sees `CUDA_VISIBLE_DEVICES=0,1`; `torch.device("cuda:1")` targets physical `cuda:3`.
+Two distinct concepts:
+- **Physical ordinal** — the integer in the device name (`cuda:2` → ordinal `2`). This is what goes into `CUDA_VISIBLE_DEVICES`.
+- **Logical index** — the 0-based position within what `CUDA_VISIBLE_DEVICES` exposes to the process. This is what `torch.device("cuda:N")` refers to inside the child.
+
+For example, if the daemon grants `cuda:2`, `reserve` sets `CUDA_VISIBLE_DEVICES=2`. Inside the process, the CUDA runtime remaps this so `torch.device("cuda:0")` targets physical `cuda:2`. A process granted `cuda:2` and `cuda:3` sees `CUDA_VISIBLE_DEVICES=2,3`; inside the process `torch.device("cuda:0")` → physical `cuda:2`, `torch.device("cuda:1")` → physical `cuda:3`.
 
 Metal does not have an equivalent device-selection environment variable — there is only one logical MPS device per system. `reserved` coordinates access to the Metal device via the reservation mechanism; the exec'd process selects it in code (e.g. `torch.device("mps")`).
 

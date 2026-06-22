@@ -58,7 +58,11 @@ class ReserveRequest:
 class GrantedSlot:
     """One granted slot in a successful reservation."""
     device_name: str
-    device_index: int   # 0-based CUDA index scoped to the reservation; -1 for non-CUDA
+    # Physical CUDA ordinal extracted from the device name (e.g. cuda:2 → 2).
+    # Set in CUDA_VISIBLE_DEVICES so the child process sees only granted devices.
+    # The child addresses them as cuda:0, cuda:1, ... (logical indices within
+    # whatever CUDA_VISIBLE_DEVICES exposes). -1 for non-CUDA devices.
+    cuda_ordinal: int
 
 
 @dataclass(frozen=True)
@@ -216,9 +220,6 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
     for res_req in request.reservations:
         reservation_id = secrets.token_hex(3)  # 6 hex chars
 
-        # Compute per-reservation CUDA device_index (0-based within reservation,
-        # CUDA devices only).
-        cuda_counter = 0
         granted_slots: list[GrantedSlot] = []
         claimed_slots: list[ActiveReservation.ClaimedSlot] = []
 
@@ -226,13 +227,16 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
             i = idx[slot.name]
             dev = avail[i].device
             if dev.type == "cuda":
-                device_index = cuda_counter
-                cuda_counter += 1
+                # Extract physical ordinal from name e.g. "cuda:2" → 2
+                try:
+                    cuda_ordinal = int(slot.name.split(":")[1])
+                except (IndexError, ValueError):
+                    cuda_ordinal = -1
             else:
-                device_index = -1
+                cuda_ordinal = -1
             granted_slots.append(GrantedSlot(
                 device_name=slot.name,
-                device_index=device_index,
+                cuda_ordinal=cuda_ordinal,
             ))
             claimed_slots.append(ActiveReservation.ClaimedSlot(
                 device_name=slot.name,

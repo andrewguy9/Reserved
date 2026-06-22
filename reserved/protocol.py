@@ -122,7 +122,7 @@ def grant_success_to_wire(result: GrantSuccess) -> bytes:
                 "slots": [
                     {
                         "device_name": gs.device_name,
-                        "device_index": gs.device_index,
+                        "cuda_ordinal": gs.cuda_ordinal,
                     }
                     for gs in gr.slots
                 ],

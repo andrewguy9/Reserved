@@ -175,10 +175,12 @@ def main() -> None:
     lease_fd = fds[0] if fds else None
 
     # Build environment variables.
+    # CUDA_VISIBLE_DEVICES takes physical ordinals (e.g. "2,3").
+    # The child process then addresses them as logical cuda:0, cuda:1, etc.
     cuda_indices = [
-        str(s["device_index"])
+        str(s["cuda_ordinal"])
         for s in granted_slots
-        if s["device_index"] >= 0
+        if s["cuda_ordinal"] >= 0
     ]
     all_device_names = [s["device_name"] for s in granted_slots]
 

@@ -128,7 +128,7 @@ class TestGrantSuccessWire:
             GrantedReservation(
                 reservation_id="a3f9c2",
                 label="train",
-                slots=(GrantedSlot(device_name="cuda:0", device_index=0),),
+                slots=(GrantedSlot(device_name="cuda:0", cuda_ordinal=0),),
                 created_at=1748000000.0,
             ),
         ))
@@ -148,10 +148,10 @@ class TestGrantSuccessWire:
         obj = json.loads(data)
         assert obj["reservations"][0]["slots"][0]["device_name"] == "cuda:0"
 
-    def test_slot_device_index(self):
+    def test_slot_cuda_ordinal(self):
         data = grant_success_to_wire(self._make_success())
         obj = json.loads(data)
-        assert obj["reservations"][0]["slots"][0]["device_index"] == 0
+        assert obj["reservations"][0]["slots"][0]["cuda_ordinal"] == 0
 
 
 class TestGrantFailureWire:

@@ -6,7 +6,7 @@ Public API:
   Request(*reservations, socket_path=None)
   DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)
   ExplicitSlot(name, *, ram_mb=0, compute_units=0)
-  GrantedDevice(device_name, device_index)
+  GrantedDevice(device_name, cuda_ordinal, logical_index)
 """
 
 from __future__ import annotations
@@ -86,7 +86,12 @@ class ExplicitSlot:
 class GrantedDevice:
     """A physical device slot granted by the daemon."""
     device_name: str
-    device_index: int  # 0-based CUDA index within reservation; -1 for non-CUDA
+    # Physical CUDA ordinal from the device name (e.g. cuda:2 → 2). Used when
+    # building CUDA_VISIBLE_DEVICES. -1 for non-CUDA devices.
+    cuda_ordinal: int
+    # Logical index within CUDA_VISIBLE_DEVICES for this reservation (0, 1, ...).
+    # This is what torch.device("cuda:N") uses inside the child process. -1 for non-CUDA.
+    logical_index: int
 
     def torch_device(self) -> Any:
         """
@@ -97,7 +102,7 @@ class GrantedDevice:
         import torch  # type: ignore[import]
         dev_type = self.device_name.split(":")[0]
         if dev_type == "cuda":
-            return torch.device(f"cuda:{self.device_index}")
+            return torch.device(f"cuda:{self.logical_index}")
         elif dev_type == "metal":
             return torch.device("mps")
         else:
@@ -287,10 +292,21 @@ class Reservation:
 
         granted = resp["reservations"][0]
         self.reservation_id = granted["reservation_id"]
-        self.devices = [
-            GrantedDevice(device_name=s["device_name"], device_index=s["device_index"])
-            for s in granted["slots"]
-        ]
+        cuda_counter = 0
+        devices = []
+        for s in granted["slots"]:
+            ordinal = s["cuda_ordinal"]
+            if ordinal >= 0:
+                logical = cuda_counter
+                cuda_counter += 1
+            else:
+                logical = -1
+            devices.append(GrantedDevice(
+                device_name=s["device_name"],
+                cuda_ordinal=ordinal,
+                logical_index=logical,
+            ))
+        self.devices = devices
         if fds:
             self._lease_sock = socket.socket(fileno=fds[0])
         else:
@@ -415,10 +431,21 @@ class Request:
         result: list[Reservation] = []
         for res, granted, fd in zip(self._reservations, granted_list, fds):
             res.reservation_id = granted["reservation_id"]
-            res.devices = [
-                GrantedDevice(device_name=s["device_name"], device_index=s["device_index"])
-                for s in granted["slots"]
-            ]
+            cuda_counter = 0
+            devices = []
+            for s in granted["slots"]:
+                ordinal = s["cuda_ordinal"]
+                if ordinal >= 0:
+                    logical = cuda_counter
+                    cuda_counter += 1
+                else:
+                    logical = -1
+                devices.append(GrantedDevice(
+                    device_name=s["device_name"],
+                    cuda_ordinal=ordinal,
+                    logical_index=logical,
+                ))
+            res.devices = devices
             res._lease_sock = socket.socket(fileno=fd)
             result.append(res)
 
