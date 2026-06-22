@@ -1,11 +1,12 @@
 [build-system]
 requires = ["setuptools>=61"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "reserved"
 version = "0.1.0"
 description = "Single-machine best-effort resource reservation daemon for physical hardware"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
