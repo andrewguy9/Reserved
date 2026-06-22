@@ -275,10 +275,13 @@ class Reservation:
             ))
         else:
             status = _query_status(socket_path)
-            req = self._solver.solve(
-                [(self.label, self._slots)],
-                status["devices"],
-            )
+            try:
+                req = self._solver.solve(
+                    [(self.label, self._slots)],
+                    status["devices"],
+                )
+            except ValueError as exc:
+                raise ReservationError(str(exc)) from exc
 
         resp, fds = _send_reserve(socket_path, req, num_reservations=1)
         if not resp.get("ok"):
@@ -448,4 +451,7 @@ class Request:
         # All reservations share the same solver (from the first one, or default).
         solver = self._reservations[0]._solver if self._reservations else ConsolidateSolver()
         specs = [(r.label, r._slots) for r in self._reservations]
-        return solver.solve(specs, devices)
+        try:
+            return solver.solve(specs, devices)
+        except ValueError as exc:
+            raise ReservationError(str(exc)) from exc
