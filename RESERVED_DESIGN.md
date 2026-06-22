@@ -621,8 +621,9 @@ with Reservation("infer", DeviceConstraint("cuda", ram_mb=30720)) as r:
     ...
 
 # Two CUDA devices in one reservation — released together
+# torch_device() returns the physical device e.g. torch.device("cuda:2"), torch.device("cuda:3")
 with Reservation("distributed", DeviceConstraint("cuda"), DeviceConstraint("cuda")) as r:
-    devices = r.torch_devices()   # [torch.device("cuda:0"), torch.device("cuda:1")]
+    devices = r.torch_devices()   # one torch.device per slot, in constraint order
     run_distributed(devices)
 ```
 
@@ -639,9 +640,11 @@ req = Request(
 checkpoint, lora = req.acquire()
 
 with checkpoint:
-    load_checkpoint(checkpoint.devices[0].torch_device())
+    ckpt_device = checkpoint.devices[0].torch_device()   # e.g. torch.device("cuda:2")
+    load_checkpoint(ckpt_device)
     with lora:
-        load_lora(lora.devices[0].torch_device())
+        lora_device = lora.devices[0].torch_device()   # may be same physical device as checkpoint
+        load_lora(lora_device)
         run_inference()
     # lora released here, VRAM returned to pool
 # checkpoint released here
@@ -653,7 +656,8 @@ actors = Request(*[
 ]).acquire()
 
 for actor, line in zip(actors, script):
-    render(actor, line)
+    device = actor.devices[0].torch_device()   # physical device e.g. torch.device("cuda:1")
+    render(device, line)
     actor.release()   # frees this actor's VRAM immediately
 ```
 
