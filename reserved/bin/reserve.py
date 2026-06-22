@@ -175,13 +175,17 @@ def main() -> None:
     lease_fd = fds[0] if fds else None
 
     # Build environment variables.
-    # CUDA_VISIBLE_DEVICES takes physical ordinals (e.g. "2,3").
-    # The child process then addresses them as logical cuda:0, cuda:1, etc.
-    cuda_indices = [
-        str(s["cuda_ordinal"])
-        for s in granted_slots
-        if s["cuda_ordinal"] >= 0
-    ]
+    # CUDA_VISIBLE_DEVICES takes physical ordinals (e.g. "2,3"), deduplicated.
+    # Multiple slots on the same device are valid (shared capacity); the device
+    # appears once in CUDA_VISIBLE_DEVICES. The child addresses it as cuda:0, etc.
+    seen: set[str] = set()
+    cuda_indices: list[str] = []
+    for s in granted_slots:
+        if s["cuda_ordinal"] >= 0:
+            ordinal = str(s["cuda_ordinal"])
+            if ordinal not in seen:
+                seen.add(ordinal)
+                cuda_indices.append(ordinal)
     all_device_names = [s["device_name"] for s in granted_slots]
 
     # Find first accelerator device (non-CPU).
