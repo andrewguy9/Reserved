@@ -712,8 +712,8 @@ Names a specific physical device. No solver is involved — the request goes dir
 **`GrantedDevice` fields and methods:**
 
 - `device_name: str` — physical device name, e.g. `"cuda:2"` or `"metal:0"`
-- `device_index: int` — remapped 0-based CUDA index scoped to this reservation. Metal and CPU devices have `device_index = -1`.
-- `torch_device() -> torch.device` — `torch.device("cuda:N")` for CUDA, `torch.device("mps")` for Metal, `torch.device("cpu")` for CPU.
+- `cuda_ordinal: int` — physical CUDA ordinal from the device name (e.g. `cuda:2` → `2`). Used directly in `torch.device("cuda:N")`. `-1` for non-CUDA devices.
+- `torch_device() -> torch.device` — returns `torch.device("cuda:N")` using the physical ordinal for CUDA, `torch.device("mps")` for Metal, `torch.device("cpu")` for CPU. The SDK does not set `CUDA_VISIBLE_DEVICES` — use the `reserve` CLI if you need process-level GPU masking.
 
 **`check()`**
 
