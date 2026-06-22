@@ -783,6 +783,42 @@ reserve-status --json | jq '.reservations | length'
 
 ## Deployment
 
+### Config file discovery
+
+The daemon searches for its config file in this order, using the first one found:
+
+1. `--config PATH` command-line flag
+2. `RESERVED_CONFIG` environment variable
+3. `~/.config/reserved/reserved.json` (user config)
+4. `/etc/reserved/reserved.json` (system config)
+
+### Socket path discovery
+
+The daemon and all clients (SDK, CLIs) discover the socket path using the same priority order:
+
+1. `--socket PATH` flag (daemon) / `socket_path=` kwarg (SDK)
+2. `RESERVED_SOCKET` environment variable
+3. `$XDG_RUNTIME_DIR/reserved.sock` (user daemon on Linux, e.g. `/var/run/user/1000/reserved.sock`)
+4. `/var/run/reserved.sock` (system daemon)
+
+`RESERVED_SOCKET` is the recommended way to point clients at a non-default socket. Set it in the shell profile or systemd environment for all processes on the machine to pick it up automatically.
+
+### Stale socket cleanup
+
+On startup, if the socket file already exists, the daemon probes it with a test connection:
+
+- If the connection is accepted: another instance is already running. The daemon exits with an error.
+- If the connection is refused: the socket is a stale artifact from a previous crash. The daemon removes it and binds a fresh one.
+
+This means operators can safely restart a crashed daemon without manually cleaning up the socket file.
+
+### Signal handling
+
+- `SIGTERM` — graceful shutdown. The daemon logs all active reservations (label, age, devices held) so operators can see what work will be disrupted, then exits.
+- `SIGINT` — same as SIGTERM. Allows clean shutdown from an interactive terminal.
+
+On exit, all lease socketpair fds held by the daemon are closed, which signals EOF to all connected clients.
+
 ### System daemon (systemd, root)
 
 Suitable for shared machines where multiple users need access to the same GPUs. The daemon runs as a dedicated service account; a unix group controls who can reserve.
@@ -809,7 +845,7 @@ Requires=reserved.socket
 After=reserved.socket
 
 [Service]
-ExecStart=/usr/bin/reserved --config /etc/reserved.json
+ExecStart=/usr/bin/reserved --config /etc/reserved/reserved.json
 User=reserved
 Group=reserved
 Restart=on-failure
@@ -848,7 +884,7 @@ Requires=reserved.socket
 After=reserved.socket
 
 [Service]
-ExecStart=/usr/bin/reserved --config %h/.config/reserved.json
+ExecStart=/usr/bin/reserved --config %h/.config/reserved/reserved.json
 Restart=on-failure
 
 [Install]
@@ -862,15 +898,55 @@ export RESERVED_SOCKET="${XDG_RUNTIME_DIR}/reserved.sock"
 
 `%t` expands to `$XDG_RUNTIME_DIR` (e.g. `/var/run/user/1000`). Set `RESERVED_SOCKET` in the shell profile so `reserve` and the SDK find the socket automatically.
 
-### Standalone (no systemd)
+### macOS (launchd)
 
-Run the daemon directly. Suitable for macOS, containers, or environments without systemd.
+Suitable for Apple Silicon workstations running macOS. The daemon runs as the logged-in user and is managed by launchd.
 
-```bash
-reserved --config /etc/reserved.json --socket /var/run/reserved.sock --socket-group gpu-users
+```xml
+<!-- ~/Library/LaunchAgents/com.reserved.daemon.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.reserved.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/reserved</string>
+    <string>--config</string>
+    <string>/Users/USERNAME/.config/reserved/reserved.json</string>
+    <string>--socket</string>
+    <string>/tmp/reserved.sock</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/reserved.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/reserved.log</string>
+</dict>
+</plist>
 ```
 
-The daemon binds the socket itself, sets group and permissions, and runs in the foreground. Use a process supervisor (launchd on macOS, runit, s6, etc.) for auto-restart.
+```bash
+launchctl load ~/Library/LaunchAgents/com.reserved.daemon.plist
+export RESERVED_SOCKET=/tmp/reserved.sock
+```
+
+Add `RESERVED_SOCKET` to `~/.zshrc` (or `~/.bash_profile`) so all terminals pick it up automatically. On macOS, `$XDG_RUNTIME_DIR` is not set by default, so an explicit socket path is required.
+
+### Standalone (no init system)
+
+Run the daemon directly in the foreground. Suitable for containers, CI environments, or quick local use.
+
+```bash
+reserved --config /etc/reserved/reserved.json --socket /var/run/reserved.sock --socket-group gpu-users
+```
+
+The daemon binds the socket itself, sets group and permissions, and runs in the foreground. Use a process supervisor (runit, s6, supervisord, etc.) for auto-restart.
 
 ---
 
