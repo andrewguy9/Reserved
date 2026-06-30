@@ -34,12 +34,11 @@ if _here not in sys.path:
 from reserved.sdk.client import (
     DeviceConstraint,
     ExplicitSlot,
-    Reservation,
     _get_socket_path,
     _query_status,
     _send_reserve,
 )
-from reserved.sdk.errors import DaemonNotRunningError, ReservationError
+from reserved.sdk.errors import DaemonNotRunningError
 from reserved.sdk.solvers import ConsolidateSolver, SpreadSolver
 from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
 
@@ -70,6 +69,63 @@ def parse_slot(spec: str) -> DeviceConstraint | ExplicitSlot:
             ram_mb=int(fields.get("ram", fields.get("ram_mb", 0))),
             compute_units=int(fields.get("compute", fields.get("compute_units", 0))),
         )
+
+
+def build_reserve_request(
+    label: str,
+    slots: list[DeviceConstraint | ExplicitSlot],
+    solver: ConsolidateSolver | SpreadSolver,
+    devices: list[dict] | None = None,
+) -> ReserveRequest:
+    """Build the explicit daemon request for already-parsed CLI slots."""
+    all_explicit = all(isinstance(s, ExplicitSlot) for s in slots)
+
+    if all_explicit or not slots:
+        slot_reqs = [
+            SlotRequest(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
+            for s in slots
+            if isinstance(s, ExplicitSlot)
+        ]
+        return ReserveRequest(reservations=(
+            ReservationRequest(label=label, slots=tuple(slot_reqs)),
+        ))
+
+    if devices is None:
+        raise ValueError("device status is required for constraint slots")
+    return solver.solve([(label, slots)], devices)
+
+
+def build_exec_env(
+    base_env: dict[str, str],
+    granted_slots: list[dict],
+    reservation_id: str,
+    lease_fd: int | None,
+) -> dict[str, str]:
+    """Build the environment passed to the reserved child process."""
+    seen: set[str] = set()
+    cuda_indices: list[str] = []
+    for s in granted_slots:
+        if s["cuda_ordinal"] >= 0:
+            ordinal = str(s["cuda_ordinal"])
+            if ordinal not in seen:
+                seen.add(ordinal)
+                cuda_indices.append(ordinal)
+
+    all_device_names = [s["device_name"] for s in granted_slots]
+    first_accel = next(
+        (s["device_name"] for s in granted_slots if not s["device_name"].startswith("cpu")),
+        all_device_names[0] if all_device_names else "",
+    )
+
+    env = base_env.copy()
+    if cuda_indices:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_indices)
+    env["RESERVED_DEVICE"] = first_accel
+    env["RESERVED_DEVICES"] = ",".join(all_device_names)
+    env["RESERVED_ID"] = reservation_id
+    if lease_fd is not None:
+        env["RESERVED_FD"] = str(lease_fd)
+    return env
 
 
 def main() -> None:
@@ -122,19 +178,8 @@ def main() -> None:
 
     label = args.label
 
-    # Determine if all slots are explicit.
-    all_explicit = all(isinstance(s, ExplicitSlot) for s in slots)
-
-    if all_explicit or not slots:
-        # Build explicit request directly.
-        slot_reqs = [
-            SlotRequest(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
-            for s in slots
-            if isinstance(s, ExplicitSlot)
-        ]
-        req = ReserveRequest(reservations=(
-            ReservationRequest(label=label, slots=tuple(slot_reqs)),
-        ))
+    if all(isinstance(s, ExplicitSlot) for s in slots) or not slots:
+        req = build_reserve_request(label, slots, solver)
     else:
         # Run solver.
         try:
@@ -144,7 +189,7 @@ def main() -> None:
             sys.exit(2)
 
         try:
-            req = solver.solve([(label, slots)], status["devices"])
+            req = build_reserve_request(label, slots, solver, status["devices"])
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -174,34 +219,8 @@ def main() -> None:
     # We have exactly one lease fd.
     lease_fd = fds[0] if fds else None
 
-    # Build environment variables.
-    # CUDA_VISIBLE_DEVICES takes physical ordinals (e.g. "2,3"), deduplicated.
-    # Multiple slots on the same device are valid (shared capacity); the device
-    # appears once in CUDA_VISIBLE_DEVICES. The child addresses it as cuda:0, etc.
-    seen: set[str] = set()
-    cuda_indices: list[str] = []
-    for s in granted_slots:
-        if s["cuda_ordinal"] >= 0:
-            ordinal = str(s["cuda_ordinal"])
-            if ordinal not in seen:
-                seen.add(ordinal)
-                cuda_indices.append(ordinal)
-    all_device_names = [s["device_name"] for s in granted_slots]
-
-    # Find first accelerator device (non-CPU).
-    first_accel = next(
-        (s["device_name"] for s in granted_slots if not s["device_name"].startswith("cpu")),
-        all_device_names[0] if all_device_names else "",
-    )
-
-    env = os.environ.copy()
-    if cuda_indices:
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_indices)
-    env["RESERVED_DEVICE"] = first_accel
-    env["RESERVED_DEVICES"] = ",".join(all_device_names)
-    env["RESERVED_ID"] = reservation_id
+    env = build_exec_env(os.environ, granted_slots, reservation_id, lease_fd)
     if lease_fd is not None:
-        env["RESERVED_FD"] = str(lease_fd)
         # Clear FD_CLOEXEC so CMD inherits the lease fd across exec.
         os.set_inheritable(lease_fd, True)
 
