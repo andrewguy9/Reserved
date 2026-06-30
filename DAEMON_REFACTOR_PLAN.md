@@ -281,3 +281,31 @@ Expected result after the refactor:
 - `daemon.py`: moderate coverage for IO effect application and polling
 - project total coverage should rise materially, but the main value is covering
   the daemon's reservation and lease lifecycle invariants.
+
+## Current Status
+
+Implemented:
+
+- Added `reserved/daemon_state.py` with explicit daemon state, events, effects,
+  and a single-step transition function.
+- Refactored `reserved/daemon.py` so the select loop translates real socket
+  activity into state events and applies returned effects through an outer
+  handle table.
+- Kept raw sockets and file descriptors out of daemon state. The state layer
+  uses logical connection and lease IDs only.
+- Added `tests/test_daemon_state.py` covering status, reserve success, reserve
+  failure, malformed input, partial transport reads, transport close, unknown
+  handles, and lease release invariants.
+
+Latest measured coverage after this pass:
+
+- `daemon_state.py`: 100%
+- project total: 52%
+- `daemon.py`: 0%, because the remaining code is the IO shell and serve loop
+  and still needs narrow shell-level tests.
+
+Recommended next step:
+
+- Add a small `tests/test_daemon_shell.py` for effect application and fd/event
+  translation. Keep those tests narrow; do not introduce a full daemon
+  subprocess harness unless the lower layers stop being sufficient.

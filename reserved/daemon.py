@@ -27,16 +27,21 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 from . import core, protocol
-from .core import (
-    Ledger,
-    ReserveRequest,
-)
-from .protocol import (
-    grant_failure_to_wire,
-    grant_success_to_wire,
-    parse_request,
-    status_result_to_wire,
-    wire_to_reserve_request,
+from .core import Ledger
+from .daemon_state import (
+    Accepted,
+    CloseLease,
+    CloseTransport,
+    CreateLease,
+    Effect,
+    Event,
+    LeaseClosed,
+    SendBytes,
+    SendLeaseFds,
+    TransportClosed,
+    TransportReceived,
+    initial_state,
+    step,
 )
 
 logger = logging.getLogger("reserved")
@@ -185,20 +190,24 @@ class Daemon:
         listen_sock: socket.socket,
         http_port: int | None = None,
     ) -> None:
-        self.ledger = ledger
+        self._state = initial_state(ledger)
         self._listen_sock = listen_sock
         self._http_port = http_port
 
-        # Maps fd → (socket, reservation_id) for long-lived lease fds.
-        self._lease_fds: dict[int, tuple[socket.socket, str]] = {}
+        # Logical handle IDs live in daemon_state. Real sockets live here.
+        self._transport_socks: dict[str, socket.socket] = {}
+        self._lease_socks: dict[str, socket.socket] = {}
+        self._pending_client_lease_socks: dict[str, socket.socket] = {}
 
-        # Maps fd → socket for short-lived transport connections (reading request).
-        self._transport_fds: dict[int, socket.socket] = {}
-
-        # Buffer for partial reads on transport connections.
-        self._transport_bufs: dict[int, bytes] = {}
+        self._fd_to_transport: dict[int, str] = {}
+        self._fd_to_lease: dict[int, str] = {}
+        self._next_connection_id = 0
 
         self._running = False
+
+    @property
+    def ledger(self) -> Ledger:
+        return self._state.ledger
 
     # ------------------------------------------------------------------
     # Public API
@@ -256,8 +265,8 @@ class Daemon:
         while self._running:
             read_fds = (
                 [listen_fd]
-                + list(self._transport_fds.keys())
-                + list(self._lease_fds.keys())
+                + list(self._fd_to_transport.keys())
+                + list(self._fd_to_lease.keys())
             )
             try:
                 readable, _, _ = select.select(read_fds, [], [], 1.0)
@@ -269,9 +278,9 @@ class Daemon:
             for fd in readable:
                 if fd == listen_fd:
                     self._accept()
-                elif fd in self._transport_fds:
+                elif fd in self._fd_to_transport:
                     self._read_transport(fd)
-                elif fd in self._lease_fds:
+                elif fd in self._fd_to_lease:
                     self._check_lease(fd)
 
     def _accept(self) -> None:
@@ -281,127 +290,33 @@ class Daemon:
             logger.warning("accept error: %s", exc)
             return
         conn.setblocking(False)
-        fd = conn.fileno()
-        self._transport_fds[fd] = conn
-        self._transport_bufs[fd] = b""
+        connection_id = self._new_connection_id()
+        self._transport_socks[connection_id] = conn
+        self._fd_to_transport[conn.fileno()] = connection_id
+        self._apply_event(Accepted(connection_id))
 
     def _read_transport(self, fd: int) -> None:
-        conn = self._transport_fds[fd]
+        connection_id = self._fd_to_transport[fd]
+        conn = self._transport_socks[connection_id]
         try:
             chunk = conn.recv(4096)
         except OSError as exc:
             if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
                 return
             logger.warning("recv error on transport fd %d: %s", fd, exc)
-            self._close_transport(fd)
+            self._apply_event(TransportClosed(connection_id))
             return
 
         if not chunk:
             # EOF on transport — client closed without sending anything.
-            self._close_transport(fd)
+            self._apply_event(TransportClosed(connection_id))
             return
 
-        self._transport_bufs[fd] += chunk
-        if b"\n" in self._transport_bufs[fd]:
-            line, _, rest = self._transport_bufs[fd].partition(b"\n")
-            self._transport_bufs[fd] = rest
-            self._handle_request(fd, conn, line)
-
-    def _handle_request(self, fd: int, conn: socket.socket, line: bytes) -> None:
-        try:
-            obj = parse_request(line)
-        except ValueError as exc:
-            logger.warning("bad request from fd %d: %s", fd, exc)
-            self._close_transport(fd)
-            return
-
-        op = obj.get("op")
-        if op == "reserve":
-            self._handle_reserve(fd, conn, obj)
-        elif op == "status":
-            self._handle_status(fd, conn)
-        else:
-            logger.warning("unknown op %r from fd %d", op, fd)
-            self._close_transport(fd)
-
-    def _handle_reserve(self, fd: int, conn: socket.socket, obj: dict) -> None:
-        try:
-            request = wire_to_reserve_request(obj)
-        except (KeyError, TypeError, ValueError) as exc:
-            logger.warning("malformed reserve request: %s", exc)
-            try:
-                conn.sendall(grant_failure_to_wire(
-                    protocol.GrantFailure(error=f"malformed request: {exc}")
-                ))
-            except OSError:
-                pass
-            self._close_transport(fd)
-            return
-
-        new_ledger, result = core.grant(self.ledger, request)
-
-        if not result.ok:
-            logger.info("reserve rejected: %s", result.error)
-            try:
-                conn.sendall(grant_failure_to_wire(result))
-            except OSError:
-                pass
-            self._close_transport(fd)
-            return
-
-        # Grant succeeded — create lease socketpairs.
-        lease_socks_daemon: list[socket.socket] = []   # daemon keeps these
-        lease_socks_client: list[socket.socket] = []   # sent to client
-        lease_fds_client: list[int] = []
-
-        for _ in result.reservations:
-            a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-            lease_socks_daemon.append(a)
-            lease_socks_client.append(b)
-            lease_fds_client.append(b.fileno())
-
-        # Send JSON response + lease fds via SCM_RIGHTS.
-        wire = grant_success_to_wire(result)
-        conn.setblocking(True)
-        try:
-            _send_fds(conn, wire, lease_fds_client)
-        except OSError as exc:
-            logger.warning("failed to send grant response: %s", exc)
-            for s in lease_socks_daemon + lease_socks_client:
-                s.close()
-            self._close_transport(fd)
-            return
-
-        # Close client ends now that they've been sent.
-        for s in lease_socks_client:
-            s.close()
-
-        # Register lease fds in the daemon's watch table.
-        self.ledger = new_ledger
-        for daemon_sock, granted_res in zip(lease_socks_daemon, result.reservations):
-            daemon_sock.setblocking(False)
-            dfd = daemon_sock.fileno()
-            self._lease_fds[dfd] = (daemon_sock, granted_res.reservation_id)
-            logger.info(
-                "granted reservation %s label=%s",
-                granted_res.reservation_id,
-                granted_res.label,
-            )
-
-        self._close_transport(fd)
-
-    def _handle_status(self, fd: int, conn: socket.socket) -> None:
-        result = core.status(self.ledger)
-        wire = status_result_to_wire(result)
-        conn.setblocking(True)
-        try:
-            conn.sendall(wire)
-        except OSError as exc:
-            logger.warning("failed to send status response: %s", exc)
-        self._close_transport(fd)
+        self._apply_event(TransportReceived(connection_id, chunk))
 
     def _check_lease(self, fd: int) -> None:
-        sock, reservation_id = self._lease_fds[fd]
+        lease_id = self._fd_to_lease[fd]
+        sock = self._lease_socks[lease_id]
         try:
             data = sock.recv(1)
         except OSError as exc:
@@ -410,28 +325,109 @@ class Daemon:
             data = b""  # treat error as EOF
         if data == b"":
             # EOF — client closed its end; release the reservation.
-            logger.info("releasing reservation %s (lease fd closed)", reservation_id)
-            self.ledger = core.release(self.ledger, reservation_id)
-            sock.close()
-            del self._lease_fds[fd]
+            logger.info("releasing lease %s (lease fd closed)", lease_id)
+            self._apply_event(LeaseClosed(lease_id))
 
-    def _close_transport(self, fd: int) -> None:
-        sock = self._transport_fds.pop(fd, None)
-        self._transport_bufs.pop(fd, None)
-        if sock is not None:
+    def _new_connection_id(self) -> str:
+        self._next_connection_id += 1
+        return f"conn-{self._next_connection_id}"
+
+    def _apply_event(self, event: Event) -> None:
+        self._state, effects = step(self._state, event)
+        self._apply_effects(effects)
+
+    def _apply_effects(self, effects: tuple[Effect, ...]) -> None:
+        for effect in effects:
+            if isinstance(effect, SendBytes):
+                self._send_bytes(effect)
+            elif isinstance(effect, CreateLease):
+                self._create_lease(effect)
+            elif isinstance(effect, SendLeaseFds):
+                self._send_lease_fds(effect)
+            elif isinstance(effect, CloseTransport):
+                self._close_transport(effect.connection_id)
+            elif isinstance(effect, CloseLease):
+                self._close_lease(effect.lease_id)
+            else:
+                raise TypeError(f"unknown daemon effect: {effect!r}")
+
+    def _send_bytes(self, effect: SendBytes) -> None:
+        conn = self._transport_socks.get(effect.connection_id)
+        if conn is None:
+            return
+        conn.setblocking(True)
+        try:
+            conn.sendall(effect.data)
+        except OSError as exc:
+            logger.warning("failed to send response: %s", exc)
+
+    def _create_lease(self, effect: CreateLease) -> None:
+        if effect.lease_id in self._lease_socks:
+            return
+        daemon_sock, client_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        daemon_sock.setblocking(False)
+        self._lease_socks[effect.lease_id] = daemon_sock
+        self._pending_client_lease_socks[effect.lease_id] = client_sock
+        self._fd_to_lease[daemon_sock.fileno()] = effect.lease_id
+
+    def _send_lease_fds(self, effect: SendLeaseFds) -> None:
+        conn = self._transport_socks.get(effect.connection_id)
+        if conn is None:
+            return
+        client_socks = [
+            self._pending_client_lease_socks[lease_id]
+            for lease_id in effect.lease_ids
+            if lease_id in self._pending_client_lease_socks
+        ]
+        conn.setblocking(True)
+        try:
+            _send_fds(conn, effect.data, [s.fileno() for s in client_socks])
+        except OSError as exc:
+            logger.warning("failed to send grant response: %s", exc)
+        finally:
+            for lease_id in effect.lease_ids:
+                sock = self._pending_client_lease_socks.pop(lease_id, None)
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+
+    def _close_transport(self, connection_id: str) -> None:
+        sock = self._transport_socks.pop(connection_id, None)
+        if sock is None:
+            return
+        self._fd_to_transport.pop(sock.fileno(), None)
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _close_lease(self, lease_id: str) -> None:
+        pending = self._pending_client_lease_socks.pop(lease_id, None)
+        if pending is not None:
             try:
-                sock.close()
+                pending.close()
             except OSError:
                 pass
 
+        sock = self._lease_socks.pop(lease_id, None)
+        if sock is None:
+            return
+        self._fd_to_lease.pop(sock.fileno(), None)
+        try:
+            sock.close()
+        except OSError:
+            pass
+
     def _shutdown(self) -> None:
         logger.info("shutting down")
-        for sock, _ in self._lease_fds.values():
-            sock.close()
-        self._lease_fds.clear()
-        for sock in self._transport_fds.values():
-            sock.close()
-        self._transport_fds.clear()
+        for lease_id in list(self._pending_client_lease_socks):
+            self._close_lease(lease_id)
+        for lease_id in list(self._lease_socks):
+            self._close_lease(lease_id)
+        for connection_id in list(self._transport_socks):
+            self._close_transport(connection_id)
         try:
             self._listen_sock.close()
         except OSError:
