@@ -1,8 +1,26 @@
 # reserved
 
+**Stop playing musical chairs with your GPUs. `reserved` prevents over-allocation crashes by letting jobs reserve hardware before they run.**
+
 A single-machine, best-effort resource reservation daemon for physical hardware (GPUs, CPU, RAM). Processes claim hardware capacity before running, and release it automatically when they exit — even on crash.
 
 `reserved` is opt-in coordination between willing processes. It does not enforce anything against programs that don't participate. It succeeds or fails immediately — there is no queue.
+
+`reserved` is experimental operator tooling. Treat it as cooperative coordination, not a security boundary, quota enforcer, scheduler, or replacement for OS/container isolation.
+
+For the detailed design, see [ARCHITECTURE.md](ARCHITECTURE.md). For the original proposal and deployment notes, see [RESERVED_DESIGN.md](RESERVED_DESIGN.md).
+
+---
+
+## Motivation
+
+On a multi-GPU workstation, it is common to run several model workloads at the same time: training jobs, long inference runs, local services, notebooks, experiments, and one-off scripts. The operating system can show that processes exist, and GPU tools can show current utilization, but they do not provide a shared application-level plan for who intends to use which resources for how long.
+
+That makes collisions easy. Two programs can start on the same GPU, overcommit VRAM, and crash. In the worst case, a collision ruins a long training job or inference run that had already spent real time getting to that point.
+
+For reservation-aware applications, there is a second problem: planning. If an application wants to dynamically scale the number of model instances it runs, it needs machine-wide metadata about available GPUs, memory budgets, and currently held reservations. That metadata needs to work across applications, not just inside one process.
+
+`reserved` exists to provide that missing coordination layer. The daemon gives the machine a shared resource ledger. The SDK lets applications participate directly and make scaling decisions from current status. The `reserve` CLI lets existing, non-reservation-aware programs participate by wrapping them in a lease-backed reservation.
 
 ---
 
@@ -13,6 +31,56 @@ pip install reserved
 ```
 
 Requires Python 3.11+.
+
+---
+
+## Architecture at a glance
+
+The `reserved` package has three main parts:
+
+1. **Daemon (`reserved`)** — runs on the machine, tracks configured hardware capacity, grants or rejects reservation requests, and releases resources when reservation lease fds close.
+2. **Python SDK (`reserved.sdk`)** — lets reservation-aware applications request resources directly, manage reservation lifetimes with context managers, and check whether a daemon restart invalidated a lease.
+3. **Command line wrapper (`reserve`)** — lets non-reservation-aware programs run under a reservation by acquiring resources, setting environment variables, and `exec`-ing the target command.
+
+There is also a small status tool, `reserve-status`, for operators and scripts.
+
+The daemon only accepts explicit device assignments. The SDK and CLI can accept higher-level constraints such as `type=cuda,ram=8192`; they resolve those constraints against daemon status before submitting an explicit reservation request.
+
+```
+reservation-aware app ── Python SDK ─┐
+                                     ├─ explicit reserve request ── reserved daemon
+ordinary command ─────── reserve CLI ┘                              │
+                                                                    └─ lease fd keeps reservation alive
+```
+
+The daemon keeps all state in memory. A reservation is alive while its lease fd is open; closing the fd, exiting the process, or crashing releases the claimed resources.
+
+---
+
+## Development and testing
+
+Install test tooling:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Run the test suite:
+
+```bash
+make test
+```
+
+`make check` runs the same suite.
+
+Generate coverage reports:
+
+```bash
+make coverage
+make htmlcov
+```
+
+The HTML report is written to `htmlcov/index.html`. Current tests focus on the pure core, protocol serialization, and solver behavior. Use the HTML report to spot gaps in daemon, SDK, CLI, fd-passing, and deployment behavior.
 
 ---
 
@@ -53,9 +121,9 @@ reserve-status
 
 ---
 
-## `reserve` CLI
+## Command line wrapper: `reserve`
 
-Wraps any command under a reservation. The reservation is held for the lifetime of the command.
+`reserve` wraps any command under a reservation. Use it for programs that do not know about the SDK. It acquires a single reservation, sets environment variables for the child process, then replaces itself with the target command.
 
 ```
 reserve LABEL [SLOT ...] [--solver consolidate|spread] [--socket PATH] -- CMD [ARGS...]
@@ -106,7 +174,9 @@ reserve pipeline --solver spread type=cuda type=cuda -- python pipeline.py
 
 ---
 
-## Python SDK
+## Python SDK: `reserved.sdk`
+
+Use the SDK when an application can participate in reservations directly. The SDK talks to the daemon, holds the lease fd for the lifetime of each `Reservation`, and exposes granted devices to application code.
 
 ```python
 from reserved.sdk.client import Reservation, Request, DeviceConstraint, ExplicitSlot
@@ -195,7 +265,7 @@ with Reservation("train", DeviceConstraint("cuda", ram_mb=16384)) as r:
 
 ---
 
-## `reserve-status`
+## Operator status: `reserve-status`
 
 ```bash
 reserve-status [--socket PATH] [--json]
@@ -250,6 +320,17 @@ Config is discovered in this order:
 
 ---
 
+## Common failure modes
+
+- **Daemon socket not found** — start the daemon, or point clients at it with `RESERVED_SOCKET` or `--socket`.
+- **Socket path mismatch** — make sure `reserved`, `reserve`, `reserve-status`, and SDK callers are using the same socket path.
+- **Connection refused** — the socket file may be stale after a crash. Starting the daemon again probes and replaces stale sockets.
+- **Reservation rejected** — resources are insufficient right now. `reserved` does not queue; callers decide whether to retry.
+- **Daemon restarted** — all in-memory reservations are lost. SDK users should call `check()` at natural checkpoints.
+- **Other processes still use the GPU** — only participating processes honor reservations. `reserved` does not constrain non-participants.
+
+---
+
 ## Deployment
 
 ### macOS (launchd)
@@ -294,7 +375,8 @@ pip install reserved
 sudo mkdir -p /etc/reserved
 # edit /etc/reserved/reserved.json
 
-# 2. Create service account and group
+# 2. Create service account and groups
+sudo groupadd --system reserved
 sudo groupadd gpu-users
 sudo useradd --system --no-create-home --group reserved reserved
 
