@@ -1,0 +1,16 @@
+{
+  "devices": [
+    {
+      "name": "metal:0",
+      "type": "metal",
+      "model": "m2",
+      "ram_mb": 65536,
+      "compute_units": 100
+    },
+    {
+      "name": "cpu",
+      "type": "cpu",
+      "ram_mb": 65536
+    }
+  ]
+}

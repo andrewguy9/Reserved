@@ -318,6 +318,8 @@ Config is discovered in this order:
 3. `~/.config/reserved/reserved.json`
 4. `/etc/reserved/reserved.json`
 
+See [examples/](examples/) for small runnable configs and scripts, including an Apple Silicon Metal example.
+
 ---
 
 ## Common failure modes
