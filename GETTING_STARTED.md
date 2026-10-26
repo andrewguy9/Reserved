@@ -1,51 +1,61 @@
 # Getting started with Reserved
 
 Use Reserved to coordinate hardware capacity between cooperating processes on
-one machine. This walkthrough installs the current checkout, runs a reservation
+one machine. This walkthrough installs Reserved from GitHub, runs a reservation
 without a GPU, and explains how to integrate an application or model worker.
 
 Reserved grants or rejects immediately. Your application owns its work queue,
-batching, retries, model loading, and worker processes. A Qwen worker that only
-needs batching in its existing environment can be built before adding Reserved.
+batching, retries, model loading, and worker processes.
 
-## Install the current checkout
+## Install from GitHub
 
-Requires Python 3.11 or later on macOS or Linux. The transport uses Unix sockets
-and file descriptor passing. The package has no runtime dependencies; PyTorch
-is imported only if you call `torch_device()` or `torch_devices()`.
+Requires Python 3.11 or later and Git on macOS or Linux. The transport uses Unix
+sockets and file descriptor passing. The package has no runtime dependencies;
+PyTorch is imported only if you call `torch_device()` or `torch_devices()`.
 
-If you already have a checkout, change to its directory and skip cloning:
+Activate your application's existing Python environment. For a standalone demo,
+you can create one instead:
+
+```bash
+python3 -m venv "$HOME/.venvs/reserved"
+. "$HOME/.venvs/reserved/bin/activate"
+```
+
+Install directly from GitHub:
+
+```bash
+python -m pip install "git+https://github.com/andrewguy9/Reserved.git"
+python -c 'from reserved.sdk import Reservation; print("Reserved SDK available")'
+```
+
+This installs the SDK and the `reserved`, `reserve`, and `reserve-status`
+commands. Pip fetches and builds the project from GitHub; you do not need to
+manage a source checkout to use them. Install Reserved into each environment
+that imports its SDK. The daemon can run in a separate environment; clients
+coordinate through the same socket.
+
+For development against a local checkout, use an editable install instead:
+
+```bash
+python -m pip install -e /absolute/path/to/Reserved
+```
+
+Replace the path with your checkout. An editable install follows changes in that
+checkout.
+
+## Try a reservation without a GPU
+
+The walkthrough reads example files from a source checkout. Keep the installed
+environment active and get the examples below. If you already have a checkout,
+change to its directory and skip cloning:
 
 ```bash
 git clone https://github.com/andrewguy9/Reserved.git
 cd Reserved
 ```
 
-For a standalone environment:
-
-```bash
-python3 -m venv env
-. env/bin/activate
-python -m pip install -e .
-```
-
-To use Reserved from an existing application environment, such as Storyteller,
-activate that environment and install the checkout by its absolute path:
-
-```bash
-python -m pip install -e /absolute/path/to/Reserved
-python -c 'from reserved.sdk import Reservation; print("Reserved SDK available")'
-```
-
-Replace the path with your checkout. An editable install follows changes in that
-checkout. Install Reserved into each environment that imports its SDK. The daemon
-can run in a separate environment; clients coordinate through the same socket.
-
-## Try a reservation without a GPU
-
-Run these commands from the Reserved checkout with the installed environment
-active. The [CPU config](examples/cpu.json) declares a 1024 MB accounting budget.
-It neither allocates memory nor discovers the machine's actual capacity.
+The [CPU config](examples/cpu.json) declares a 1024 MB accounting budget. It
+neither allocates memory nor discovers the machine's actual capacity.
 
 ### Terminal one starts the daemon
 
@@ -64,7 +74,7 @@ Open another terminal at the same checkout and activate the same environment.
 For the standalone environment above:
 
 ```bash
-. env/bin/activate
+. "$HOME/.venvs/reserved/bin/activate"
 export RESERVED_SOCKET=/tmp/reserved-getting-started.sock
 reserve-status
 python examples/cpu_job.py
@@ -137,13 +147,13 @@ after the last client lease copy closes. Forked children or deliberately
 inherited copies can extend that lifetime.
 
 For a command in another virtual environment, use that environment's Python
-executable after `--`. For example, if your application provides `tts_worker`:
+executable after `--`. For example, if your application provides `model_worker`:
 
 ```bash
-reserve qwen-worker type=cuda,ram=8192 -- /absolute/path/to/model-env/bin/python -m tts_worker
+reserve model-worker type=cuda,ram=8192 -- /absolute/path/to/model-env/bin/python -m model_worker
 ```
 
-`tts_worker` belongs to the application; Reserved does not provide it. The
+`model_worker` belongs to the application; Reserved does not provide it. The
 8192 MB budget is illustrative and must be replaced with your measured needs.
 The CLI preserves the lease across exec, but does not monitor or stop the
 command when the daemon dies. Use worker-side SDK acquisition and `check()`

@@ -9,7 +9,7 @@ A single-machine, best-effort resource reservation daemon for physical hardware 
 `reserved` is experimental operator tooling. Treat it as cooperative coordination, not a security boundary, quota enforcer, scheduler, or replacement for OS/container isolation.
 
 **New clients and agents: start with [Getting started](GETTING_STARTED.md)** for
-installation from a local checkout, a walkthrough requiring no GPU, and guidance
+installation from GitHub, a walkthrough requiring no GPU, and guidance
 on integrating an application or model worker.
 
 For the detailed design, see [ARCHITECTURE.md](ARCHITECTURE.md). For the original proposal and deployment notes, see [RESERVED_DESIGN.md](RESERVED_DESIGN.md).
@@ -32,6 +32,12 @@ For reservation-aware applications, there is a second problem: planning. If an a
 
 ```bash
 pip install reserved
+```
+
+To install the current source directly from GitHub (requires Git):
+
+```bash
+python -m pip install "git+https://github.com/andrewguy9/Reserved.git"
 ```
 
 Requires Python 3.11+.
