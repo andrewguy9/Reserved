@@ -163,14 +163,18 @@ The lease fd is a normal file descriptor. Standard POSIX semantics apply.
 
 **fork()** — duplicates all fds into the child. Both parent and child hold the reservation. The reservation lives until the last copy of the fd is closed.
 
-**exec()** — Python sets `O_CLOEXEC` by default. Clear it explicitly to pass the lease across exec:
+**exec()** — a lease fd must be inheritable to survive exec. The `reserve` CLI
+sets this up, sets environment variables, and replaces itself with CMD:
 
-```python
-os.set_inheritable(r._sock.fileno(), True)
-os.execvp("worker", ["worker"])
+```bash
+reserve worker type=cuda,ram=8192 -- /path/to/model-env/bin/python worker.py
 ```
 
-This is how the `reserve` CLI works: acquires the lease, clears `FD_CLOEXEC`, sets env vars, execs CMD. CMD inherits the fd and holds the lease for its lifetime without knowing about `reserved`.
+CMD inherits the fd and holds the lease for its lifetime without knowing about
+Reserved. The SDK currently has no public API for transferring or adopting a
+lease. An SDK-aware worker can acquire its own reservation and call `check()`
+at checkpoints; the CLI wrapper alone does not stop a command on lease loss.
+See [Getting started](GETTING_STARTED.md#hold-capacity-for-a-model-worker).
 
 ---
 
