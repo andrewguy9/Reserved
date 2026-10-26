@@ -8,6 +8,10 @@ A single-machine, best-effort resource reservation daemon for physical hardware 
 
 `reserved` is experimental operator tooling. Treat it as cooperative coordination, not a security boundary, quota enforcer, scheduler, or replacement for OS/container isolation.
 
+**New clients and agents: start with [Getting started](GETTING_STARTED.md)** for
+installation from a local checkout, a walkthrough requiring no GPU, and guidance
+on integrating an application or model worker.
+
 For the detailed design, see [ARCHITECTURE.md](ARCHITECTURE.md). For the original proposal and deployment notes, see [RESERVED_DESIGN.md](RESERVED_DESIGN.md).
 
 ---
@@ -109,11 +113,15 @@ reserved
 On macOS, where `/var/run` requires root:
 
 ```bash
-reserved --socket /tmp/reserved.sock
 export RESERVED_SOCKET=/tmp/reserved.sock
+reserved --socket "$RESERVED_SOCKET"
 ```
 
 **3. Check status:**
+
+In another terminal, activate the installed environment. If you used a custom
+socket, set `RESERVED_SOCKET` to the same path there (for the macOS command above,
+run `export RESERVED_SOCKET=/tmp/reserved.sock`).
 
 ```bash
 reserve-status
@@ -209,33 +217,29 @@ with Reservation("distributed", DeviceConstraint("cuda"), DeviceConstraint("cuda
 
 ### Multiple reservations — atomic acquire, independent release
 
+`Request.acquire()` returns reservations that are already acquired. Release them
+in `finally` blocks. The current `Reservation.__enter__()` attempts a fresh
+acquisition, so do not put these returned objects in `with` statements.
+
 ```python
-# Stable diffusion: checkpoint held for the session, LoRA freed after each inference
-req = Request(
-    Reservation("checkpoint", DeviceConstraint("cuda", ram_mb=8192)),
-    Reservation("lora",       DeviceConstraint("cuda", ram_mb=2048)),
-)
-checkpoint, lora = req.acquire()
+# Runs against the CPU config in the getting-started walkthrough.
+first, second = Request(
+    Reservation("first", DeviceConstraint("cpu", ram_mb=256)),
+    Reservation("second", DeviceConstraint("cpu", ram_mb=256)),
+).acquire()
 
-with checkpoint:
-    load_checkpoint(checkpoint.devices[0].torch_device())
-    with lora:
-        load_lora(lora.devices[0].torch_device())
-        run_inference()
-    # lora released here, VRAM returned to pool
-# checkpoint released here
-
-# TTS pipeline: 5 actors acquired atomically, freed one by one as each finishes
-actors = Request(*[
-    Reservation(f"actor-{i}", DeviceConstraint("cuda", ram_mb=4096))
-    for i in range(5)
-]).acquire()
-
-for actor, line in zip(actors, script):
-    device = actor.devices[0].torch_device()
-    render(device, line)
-    actor.release()
+try:
+    first.check()
+    second.check()
+    first.release()
+    second.check()  # second remains alive after first is released
+finally:
+    first.release()  # repeated release is safe
+    second.release()
 ```
+
+Releasing a reservation returns its accounting capacity. Unload any model using
+that capacity before releasing it; Reserved does not free GPU memory itself.
 
 ### Explicit placement (orchestrator)
 
