@@ -1,0 +1,5 @@
+{
+  "devices": [
+    {"name": "cpu", "type": "cpu", "ram_mb": 4096, "compute_units": 100}
+  ]
+}
