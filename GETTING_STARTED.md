@@ -3,6 +3,8 @@
 Use Reserved to coordinate hardware capacity between cooperating processes on
 one machine. This walkthrough installs Reserved from GitHub, runs a reservation
 without a GPU, and explains how to integrate an application or model worker.
+It also demonstrates planning a pool of batched workers and gracefully draining
+their reservations as the queue empties.
 
 Reserved grants or rejects immediately. Your application owns its work queue,
 batching, retries, model loading, and worker processes.
@@ -101,9 +103,10 @@ The wrapped status command should see its own `cli-example` reservation and
 `reservations` array becomes empty. Reserved sets the lease up before replacing
 the wrapper with the command, so the command needs no SDK integration.
 
-Stop the demo daemon with Ctrl-C in terminal one when finished. All commands in
-the rest of this guide assume a daemon configured for your real hardware; see
-the [resource config reference](README.md#resource-config).
+Stop the demo daemon with Ctrl-C in terminal one when finished. For real
+workloads, configure the daemon for your hardware using the
+[resource config reference](README.md#resource-config). The worker-pool demo
+below uses its own CPU accounting budget and socket.
 
 ## Choose the integration path
 
@@ -112,6 +115,7 @@ the [resource config reference](README.md#resource-config).
 | Python worker that can check its lease between batches | `Reservation` context manager | The worker |
 | Existing command that needs a reservation and CUDA masking | `reserve LABEL SLOT -- CMD` | The command and any inherited lease copies |
 | Several reservations that must be granted together | `Request(...).acquire()` | The caller, with explicit `release()` cleanup |
+| Application managing a pool of batched workers | `recommend_workers()` and `Request(...).acquire()` | The application, through loading, processing, draining, and teardown |
 | Coordinator inspecting capacity | `reserve-status --json` | Status is a snapshot and holds no capacity |
 
 The [CPU example](examples/cpu_job.py) is a complete SDK entry point. The
@@ -125,6 +129,52 @@ After `Request.acquire()`, its returned reservations are already acquired. Use
 `try`/`finally` and `release()` as in the README. The current implementation of
 `with reservation:` attempts a fresh acquisition, including for an already
 acquired reservation.
+
+## Plan a pool of batched workers
+
+Use `recommend_workers()` when your application owns several model workers and
+wants help deciding how many to run. Each call supplies:
+
+- The shared queue count, per-worker resources, worker cap, and rough batch,
+  startup, and shutdown timings for each workload.
+- The reservation ID, lifecycle state, and buffered request count for each
+  existing worker, including workers still loading or draining.
+
+The SDK reads daemon availability and returns workers to keep, start, or drain.
+Your application acquires the suggested reservations, launches workers, and
+dispatches work. A drain recommendation means cease further dispatch, finish
+buffered work and partial final batches, then unload and release the lease.
+Draining workers continue to occupy capacity until their leases close. Polling
+does not duplicate loading workers or reverse a drain already underway.
+
+Try the [dummy worker pool](examples/worker_planner.py) from your checkout, with
+the installed environment active in both terminals. It uses real reservations
+and asyncio tasks to simulate four services, so it needs no model runtime or GPU.
+
+In terminal one:
+
+```bash
+export RESERVED_SOCKET=/tmp/reserved-worker-planner.sock
+reserved --config examples/worker_planner.json --socket "$RESERVED_SOCKET"
+```
+
+In terminal two, activate the same environment and run:
+
+```bash
+export RESERVED_SOCKET=/tmp/reserved-worker-planner.sock
+python examples/worker_planner.py
+reserve-status
+```
+
+The example prints startup, readiness, draining, a partial batch of three, and
+individual lease releases. It finishes 83 requests and returns its reservations;
+query status again if the final release has not yet been observed by the daemon.
+Stop this demo daemon with Ctrl-C when done.
+
+The [SDK reference](README.md#planning-a-pool-of-batched-workers) describes the
+declarations and plan fields. Recommendations use a conservative timing
+heuristic. The application retains control of batching, request ordering,
+process supervision, and acquisition retries.
 
 ## Hold capacity for a model worker
 
@@ -194,7 +244,7 @@ daemon additionally considers `XDG_RUNTIME_DIR` when neither an argument nor
 
 - [README](README.md): resource configuration, API examples, status, and deployment.
 - [Architecture](ARCHITECTURE.md): current protocol, device indices, and lease mechanics.
-- [Examples](examples/README.md): CPU walkthrough and Apple Silicon configuration.
+- [Examples](examples/README.md): single-reservation CPU walkthrough, batched worker pool, and Apple Silicon configuration.
 - [Contributor guide](AGENTS.md): implementation and verification rules when changing Reserved.
 
 `RESERVED_DESIGN.md` and `DAEMON_REFACTOR_PLAN.md` are historical context. Use

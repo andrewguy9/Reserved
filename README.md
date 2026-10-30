@@ -12,6 +12,14 @@ A single-machine, best-effort resource reservation daemon for physical hardware 
 installation from GitHub, a walkthrough requiring no GPU, and guidance
 on integrating an application or model worker.
 
+For applications that run multiple model workers, the SDK includes a
+[worker planner](#planning-a-pool-of-batched-workers). Describe your backlog,
+worker resource requirements, rough timings, and existing reservations to get
+recommendations for workers to keep, start, or gracefully drain. Try the
+[batched worker example](examples/README.md#batched-worker-planning) to see a
+complete application control loop using real reservations and CPU-only dummy
+services.
+
 For the detailed design, see [ARCHITECTURE.md](ARCHITECTURE.md). For the original proposal and deployment notes, see [RESERVED_DESIGN.md](RESERVED_DESIGN.md).
 
 ---
@@ -49,7 +57,7 @@ Requires Python 3.11+.
 The `reserved` package has three main parts:
 
 1. **Daemon (`reserved`)** — runs on the machine, tracks configured hardware capacity, grants or rejects reservation requests, and releases resources when reservation lease fds close.
-2. **Python SDK (`reserved.sdk`)** — lets reservation-aware applications request resources directly, manage reservation lifetimes with context managers, and check whether a daemon restart invalidated a lease.
+2. **Python SDK (`reserved.sdk`)** — lets reservation-aware applications request resources directly, manage reservation lifetimes, check lease health, and plan worker pools from their backlogs and current reservations.
 3. **Command line wrapper (`reserve`)** — lets non-reservation-aware programs run under a reservation by acquiring resources, setting environment variables, and `exec`-ing the target command.
 
 There is also a small status tool, `reserve-status`, for operators and scripts.
@@ -132,6 +140,20 @@ run `export RESERVED_SOCKET=/tmp/reserved.sock`).
 ```bash
 reserve-status
 ```
+
+**4. Choose how your application uses reservations:**
+
+- Wrap an existing command with the [`reserve` CLI](#command-line-wrapper-reserve).
+- Acquire resources directly with the [Python SDK](#python-sdk-reservedsdk).
+- For an application that manages multiple workers, use
+  [`recommend_workers()`](#planning-a-pool-of-batched-workers) to size its pool
+  and gradually drain workers as the queue empties. The application launches
+  workers, dispatches batches, and releases leases after draining and unloading.
+
+The [batched worker getting-started example](examples/README.md#batched-worker-planning)
+includes the config and commands to run four dummy services through an
+83-request backlog, including a partial final batch. It runs on a CPU budget
+without a model runtime or GPU.
 
 ---
 
@@ -266,6 +288,66 @@ with Reservation("train", DeviceConstraint("cuda", ram_mb=16384)) as r:
         r.check()
         train_epoch(model, data)
 ```
+
+### Planning a pool of batched workers
+
+`recommend_workers()` reads daemon status and recommends workers to keep, drain,
+or start from a shared queue and the reservations your application already owns.
+It uses rough batch, loading, and teardown estimates to size the accepting pool
+and phase out workers as the queue empties.
+
+```python
+from reserved.sdk import (
+    Backlog, DeviceConstraint, OwnedWorker, Request, Reservation,
+    recommend_workers,
+)
+
+backlog = Backlog(
+    workload_id="model-a-fp16",
+    queued_requests=1000,  # Excludes requests already assigned to workers.
+    worker=DeviceConstraint("cuda", ram_mb=8192, compute_units=50),
+    max_workers=8,
+    batch_size=16,
+    batch_seconds=2,
+    startup_seconds=30,
+    shutdown_seconds=5,
+)
+
+# Pass every managed lease on subsequent calls, including loading and draining
+# workers. Buffered requests include both prefetched and executing batches.
+workers = []  # e.g. OwnedWorker(existing_id, "model-a-fp16", "accepting", 32)
+plan = recommend_workers([backlog], workers)
+
+if plan.expired:
+    # Reconcile affected workers before applying another plan.
+    raise RuntimeError(f"expired reservations: {plan.expired}")
+
+# Keep these lease objects alive and register them before launching workers.
+leases = Request(*[
+    Reservation(start.workload_id, start.slot) for start in plan.start
+]).acquire()
+```
+
+The application applies `plan.drain` by ceasing dispatch to those workers,
+allowing their buffered work and partial final batches to finish, then unloading
+and closing their leases. Already draining workers remain in `plan.keep`, which
+means continue their current state. Draining reservations stay occupied until
+the daemon observes their released leases; the planner does not reclaim them in
+advance. Loading workers are counted so polling does not duplicate them.
+
+`plan.shortfall` maps workload IDs to `WorkerShortfall(count, reasons)`. Reasons
+are `capacity`, `startup_cost`, `starting`, or `worker_limit`; multiple constraints
+can apply. Covered targets are omitted. If acquisition loses a race, retain
+surviving workers and request a fresh recommendation. Use `plan_workers()` with
+a parsed status dictionary for planning without IO.
+Malformed workload or worker declarations raise `ValueError`.
+
+This is a conservative allocation heuristic using application-supplied timings.
+It assumes one slot per worker and the same service rate across a workload's
+compatible devices. Request ordering remains with the application. The
+[dummy worker example](examples/worker_planner.py) demonstrates a complete
+control loop, and [the project definition](WORKER_PLANNER_PLAN.md) describes the
+algorithm and lifecycle contract.
 
 ### Errors
 
