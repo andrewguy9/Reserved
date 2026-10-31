@@ -14,17 +14,17 @@ budget and show status while the reservation is held. It needs no PyTorch or GPU
 Start a daemon with the example hardware config:
 
 ```bash
-reserved --config examples/m2_mac.json --socket /tmp/reserved.sock
+reserved --config examples/m2_mac.json
 ```
 
 In another shell, run the example SDK client:
 
 ```bash
-RESERVED_SOCKET=/tmp/reserved.sock python3 examples/metal_job.py
+python3 examples/metal_job.py
 ```
 
 While it is waiting, inspect the held reservation:
 
 ```bash
-RESERVED_SOCKET=/tmp/reserved.sock reserve-status
+reserve-status
 ```

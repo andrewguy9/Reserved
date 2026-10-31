@@ -234,6 +234,7 @@ No allocation logic in the shell — only IO, fd lifecycle, and ledger swapping.
 reserved/
   core.py        # pure functions, immutable Ledger
   daemon.py      # imperative shell, select loop, SCM_RIGHTS
+  paths.py       # socket discovery shared by daemon, SDK, and CLIs
   protocol.py    # single-line JSON serialization (explicit types only)
   sdk/
     client.py    # Reservation, Request, DeviceConstraint, ExplicitSlot

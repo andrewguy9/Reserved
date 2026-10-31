@@ -1,0 +1,11 @@
+[Unit]
+Description=ReserveD resource reservation socket
+
+[Socket]
+ListenStream=/var/run/reserved.sock
+SocketGroup=gpu-users
+SocketMode=0660
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

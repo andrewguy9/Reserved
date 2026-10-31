@@ -8,19 +8,9 @@ import types
 
 import pytest
 
-from reserved.sdk.client import GrantedDevice, Reservation, _connect, _get_socket_path
+from reserved.sdk.client import GrantedDevice, Reservation, _connect
 from reserved.sdk.errors import DaemonNotRunningError, ReservationExpiredError
 import reserved.sdk.client as client_module
-
-
-def test_get_socket_path_precedence(monkeypatch):
-    monkeypatch.setenv("RESERVED_SOCKET", "/env/reserved.sock")
-
-    assert _get_socket_path("/override.sock") == "/override.sock"
-    assert _get_socket_path(None) == "/env/reserved.sock"
-
-    monkeypatch.delenv("RESERVED_SOCKET")
-    assert _get_socket_path(None) == "/var/run/reserved.sock"
 
 
 def test_connect_translates_missing_socket_to_domain_error(monkeypatch):

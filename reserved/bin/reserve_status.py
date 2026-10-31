@@ -21,6 +21,7 @@ if _here not in sys.path:
 
 from reserved.sdk.client import _get_socket_path, _query_status
 from reserved.sdk.errors import DaemonNotRunningError
+from reserved.paths import SOCKET_PATH_HELP
 
 
 def _format_human(status: dict) -> str:
@@ -59,7 +60,7 @@ def main() -> None:
     parser.add_argument(
         "--socket",
         default=None,
-        help="Daemon socket path [default: $RESERVED_SOCKET or /var/run/reserved.sock]",
+        help=SOCKET_PATH_HELP,
     )
     parser.add_argument(
         "--json",
