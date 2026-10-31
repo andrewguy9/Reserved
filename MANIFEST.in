@@ -1,0 +1,4 @@
+include INSTALL.md GETTING_STARTED.md ARCHITECTURE.md RESERVED_DESIGN.md AGENTS.md Makefile
+include reserved.example.json
+recursive-include deploy *.socket *.service *.py
+recursive-include examples *.json *.py *.md

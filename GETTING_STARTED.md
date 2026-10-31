@@ -186,13 +186,16 @@ SDK has no configurable communication timeout, so applications needing bounded
 supervision must provide it at the worker/process level.
 
 Use one explicit socket path throughout setup. SDK and CLI callers use their
-socket argument, then `RESERVED_SOCKET`, then `/var/run/reserved.sock`. The
-daemon additionally considers `XDG_RUNTIME_DIR` when neither an argument nor
-`RESERVED_SOCKET` is set, so relying on defaults can select different sockets.
+socket argument, then `RESERVED_SOCKET`, then `$XDG_RUNTIME_DIR/reserved.sock`
+when set, then `/tmp/reserved-<uid>.sock` on macOS or `/var/run/reserved.sock`
+on Linux. The standalone daemon uses the same discovery rules. A systemd
+service adopts its supplied listener. For persistent services and client
+configuration, follow the [installation guide](INSTALL.md).
 
 ## Continue from here
 
 - [README](README.md): resource configuration, API examples, status, and deployment.
+- [Installation guide](INSTALL.md): Linux systemd and macOS launchd setup, verification, and service management.
 - [Architecture](ARCHITECTURE.md): current protocol, device indices, and lease mechanics.
 - [Examples](examples/README.md): CPU walkthrough and Apple Silicon configuration.
 - [Contributor guide](AGENTS.md): implementation and verification rules when changing Reserved.

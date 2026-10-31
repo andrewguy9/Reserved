@@ -1,0 +1,10 @@
+[Unit]
+Description=ReserveD user resource reservation socket
+
+[Socket]
+ListenStream=%t/reserved.sock
+SocketMode=0600
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

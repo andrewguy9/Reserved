@@ -24,22 +24,12 @@ from ..core import (
     SlotRequest,
 )
 from .. import protocol
+from ..paths import resolve_socket_path as _get_socket_path
 from .errors import DaemonNotRunningError, ReservationError, ReservationExpiredError
 from .solvers import ConsolidateSolver
 
 # Type alias used by solvers.
 ReservationSpec = tuple[str, list]  # (label, list[DeviceConstraint | ExplicitSlot])
-
-_DEFAULT_SOCKET = "/var/run/reserved.sock"
-
-
-def _get_socket_path(override: str | None = None) -> str:
-    if override:
-        return override
-    return os.environ.get("RESERVED_SOCKET", _DEFAULT_SOCKET)
-
-
-
 
 # ---------------------------------------------------------------------------
 # Slot descriptor types (in-process only, never serialized)

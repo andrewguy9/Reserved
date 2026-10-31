@@ -28,6 +28,7 @@ from typing import Any
 
 from . import core, protocol
 from .core import Ledger
+from .paths import SOCKET_PATH_HELP, resolve_socket_path as _resolve_socket
 from .daemon_state import (
     Accepted,
     CloseLease,
@@ -443,16 +444,17 @@ def _probe_socket(socket_path: str) -> str:
     Check whether an existing socket file is live or stale.
     Returns 'live', 'stale', or 'absent'.
     """
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         probe.settimeout(1.0)
         probe.connect(socket_path)
-        probe.close()
         return "live"
     except FileNotFoundError:
         return "absent"
-    except (ConnectionRefusedError, OSError):
+    except ConnectionRefusedError:
         return "stale"
+    finally:
+        probe.close()
 
 
 def _acquire_socket(socket_path: str, socket_group: str | None) -> socket.socket:
@@ -479,12 +481,37 @@ def _acquire_socket(socket_path: str, socket_group: str | None) -> socket.socket
     return sock
 
 
-def _acquire_socket_systemd() -> socket.socket:
-    """Adopt a socket passed by systemd socket activation."""
+def _acquire_socket_systemd() -> socket.socket | None:
+    """Adopt one listening Unix stream socket addressed to this process."""
+    listen_pid = os.environ.pop("LISTEN_PID", None)
+    listen_fds = os.environ.pop("LISTEN_FDS", None)
+    os.environ.pop("LISTEN_FDNAMES", None)
+    if listen_pid != str(os.getpid()) or listen_fds is None:
+        return None
+    try:
+        count = int(listen_fds)
+    except ValueError:
+        raise ValueError("LISTEN_FDS must be an integer") from None
+    if count == 0:
+        return None
+    if count != 1:
+        raise ValueError("reserved requires exactly one systemd listening socket")
     fd = SD_LISTEN_FDS_START
-    sock = socket.fromfd(fd, socket.AF_UNIX, socket.SOCK_STREAM)
-    # fromfd duplicates; close the original.
-    os.close(fd)
+    sock = socket.socket(fileno=fd)
+    try:
+        if (
+            sock.family != socket.AF_UNIX
+            or sock.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM
+        ):
+            raise ValueError("systemd must pass a listening Unix stream socket")
+        # SO_ACCEPTCONN is unavailable for macOS Unix sockets. Systemd runs on
+        # Linux; keeping adoption portable also permits fd-passing smoke checks.
+        if sys.platform == "linux" and not sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN):
+            raise ValueError("systemd must pass a listening Unix stream socket")
+        sock.set_inheritable(False)
+    except BaseException:
+        sock.close()
+        raise
     return sock
 
 
@@ -494,9 +521,13 @@ def _acquire_socket_systemd() -> socket.socket:
 
 def _resolve_config(flag: str | None) -> str:
     """Return the config file path using the documented fallback chain."""
+    explicit = flag or os.environ.get("RESERVED_CONFIG")
+    if explicit:
+        if os.path.isfile(explicit):
+            return explicit
+        print(f"error: config file not found: {explicit}", file=sys.stderr)
+        sys.exit(1)
     candidates = [
-        flag,
-        os.environ.get("RESERVED_CONFIG"),
         os.path.expanduser("~/.config/reserved/reserved.json"),
         "/etc/reserved/reserved.json",
     ]
@@ -512,21 +543,6 @@ def _resolve_config(flag: str | None) -> str:
     sys.exit(1)
 
 
-def _resolve_socket(flag: str | None) -> str:
-    """Return the socket path using the documented fallback chain."""
-    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
-    candidates = [
-        flag,
-        os.environ.get("RESERVED_SOCKET"),
-        os.path.join(xdg_runtime, "reserved.sock") if xdg_runtime else None,
-        "/var/run/reserved.sock",
-    ]
-    for path in candidates:
-        if path:
-            return path
-    return "/var/run/reserved.sock"
-
-
 def main() -> None:
     import argparse
     import json as _json
@@ -540,11 +556,7 @@ def main() -> None:
         "Falls back to RESERVED_CONFIG env var, "
         "~/.config/reserved/reserved.json, /etc/reserved/reserved.json."
     ))
-    parser.add_argument("--socket", default=None, help=(
-        "Unix domain socket path. "
-        "Falls back to RESERVED_SOCKET env var, "
-        "$XDG_RUNTIME_DIR/reserved.sock, /var/run/reserved.sock."
-    ))
+    parser.add_argument("--socket", default=None, help=SOCKET_PATH_HELP)
     parser.add_argument("--socket-group", default=None, help="Set socket file group")
     parser.add_argument("--http", type=int, default=None, metavar="PORT",
                         help="Start HTTP monitoring server on PORT")
@@ -565,14 +577,16 @@ def main() -> None:
     logger.info("loaded %d device(s) from %s", len(ledger.availability), config_path)
 
     # Socket acquisition.
-    listen_fd_env = os.environ.get("LISTEN_FDS")
-    if listen_fd_env is not None:
-        logger.info("using systemd socket activation (LISTEN_FDS=%s)", listen_fd_env)
+    try:
         listen_sock = _acquire_socket_systemd()
-    else:
-        socket_path = _resolve_socket(args.socket)
-        listen_sock = _acquire_socket(socket_path, args.socket_group)
-        logger.info("bound socket at %s", socket_path)
+        if listen_sock is None:
+            socket_path = _resolve_socket(args.socket)
+            listen_sock = _acquire_socket(socket_path, args.socket_group)
+            logger.info("bound socket at %s", socket_path)
+        else:
+            logger.info("using systemd socket activation")
+    except (OSError, ValueError) as exc:
+        parser.exit(1, f"error: could not acquire listening socket: {exc}\n")
 
     daemon = Daemon(ledger, listen_sock, http_port=args.http)
     daemon.run()

@@ -12,7 +12,7 @@ A single-machine, best-effort resource reservation daemon for physical hardware 
 installation from GitHub, a walkthrough requiring no GPU, and guidance
 on integrating an application or model worker.
 
-For the detailed design, see [ARCHITECTURE.md](ARCHITECTURE.md). For the original proposal and deployment notes, see [RESERVED_DESIGN.md](RESERVED_DESIGN.md).
+For installation and service management, see [INSTALL.md](INSTALL.md). For the detailed design, see [ARCHITECTURE.md](ARCHITECTURE.md). The original proposal is in [RESERVED_DESIGN.md](RESERVED_DESIGN.md).
 
 ---
 
@@ -30,17 +30,27 @@ For reservation-aware applications, there is a second problem: planning. If an a
 
 ## Install
 
+Requires Python 3.11+. Install from this repository in a virtual environment:
+
 ```bash
-pip install reserved
+git clone https://github.com/andrewguy9/Reserved.git
+cd Reserved
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
 ```
 
-To install the current source directly from GitHub (requires Git):
+The public PyPI package named `reserved` is an unrelated project. Use this
+checkout as the package source. For persistent installations, follow the
+[Linux systemd or macOS launchd guide](INSTALL.md), which provides fixed paths
+and matching service definitions.
+
+For SDK installation into an existing environment, you can also install directly
+from GitHub (requires Git):
 
 ```bash
 python -m pip install "git+https://github.com/andrewguy9/Reserved.git"
 ```
-
-Requires Python 3.11+.
 
 ---
 
@@ -72,7 +82,7 @@ The daemon keeps all state in memory. A reservation is alive while its lease fd 
 Install test tooling:
 
 ```bash
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 ```
 
 Run the test suite:
@@ -90,7 +100,10 @@ make coverage
 make htmlcov
 ```
 
-The HTML report is written to `htmlcov/index.html`. Current tests focus on the pure core, protocol serialization, and solver behavior. Use the HTML report to spot gaps in daemon, SDK, CLI, fd-passing, and deployment behavior.
+The HTML report is written to `htmlcov/index.html`. Tests cover the core, protocol,
+solvers, daemon state transitions and startup, shared socket discovery, SDK, and
+CLI helpers. Service-manager installation and boot/login behavior need platform
+verification using [INSTALL.md](INSTALL.md).
 
 ---
 
@@ -108,7 +121,9 @@ The HTML report is written to `htmlcov/index.html`. Current tests focus on the p
 }
 ```
 
-Save it to `~/.config/reserved/reserved.json` (or pass `--config PATH`).
+Create `~/.config/reserved` with `mkdir -p ~/.config/reserved` and save the JSON
+as `reserved.json` there (or pass `--config PATH`). Adapt the devices and budgets
+to your hardware. For a CPU-only check, copy [examples/cpu.json](examples/cpu.json).
 
 **2. Start the daemon:**
 
@@ -116,18 +131,17 @@ Save it to `~/.config/reserved/reserved.json` (or pass `--config PATH`).
 reserved
 ```
 
-On macOS, where `/var/run` requires root:
-
-```bash
-export RESERVED_SOCKET=/tmp/reserved.sock
-reserved --socket "$RESERVED_SOCKET"
-```
+The daemon runs in the foreground. On Linux it uses
+`$XDG_RUNTIME_DIR/reserved.sock` when available; on macOS its fallback is
+`/tmp/reserved-<uid>.sock`. Clients use the same discovery rules. On Linux
+without `XDG_RUNTIME_DIR`, choose a writable path explicitly with
+`export RESERVED_SOCKET="/tmp/reserved-$(id -u)-test.sock"` in both shells, or use the
+[system service](INSTALL.md#linux-system-service).
 
 **3. Check status:**
 
-In another terminal, activate the installed environment. If you used a custom
-socket, set `RESERVED_SOCKET` to the same path there (for the macOS command above,
-run `export RESERVED_SOCKET=/tmp/reserved.sock`).
+In a second shell, activate the same virtual environment first. If you selected
+a custom socket, export the same `RESERVED_SOCKET` there:
 
 ```bash
 reserve-status
@@ -328,6 +342,10 @@ Config is discovered in this order:
 3. `~/.config/reserved/reserved.json`
 4. `/etc/reserved/reserved.json`
 
+An explicitly selected missing config is an error rather than a reason to use
+a different file. See [socket discovery](INSTALL.md#socket-and-config-discovery)
+for daemon and client socket defaults and overrides.
+
 See [examples/](examples/) for small runnable configs and scripts, including an Apple Silicon Metal example.
 
 ---
@@ -345,124 +363,15 @@ See [examples/](examples/) for small runnable configs and scripts, including an 
 
 ## Deployment
 
-### macOS (launchd)
+See [INSTALL.md](INSTALL.md) for complete, source-based installation recipes:
 
-```bash
-# 1. Create config
-mkdir -p ~/.config/reserved
-# edit ~/.config/reserved/reserved.json
+- [Linux system service](INSTALL.md#linux-system-service): dedicated service account, shared group, and systemd socket activation.
+- [Linux user service](INSTALL.md#linux-user-service): per-user socket activation and optional operation after logout.
+- [macOS user agent](INSTALL.md#macos-user-agent): generated launchd plist with absolute virtual environment paths.
 
-# 2. Install launchd agent
-cat > ~/Library/LaunchAgents/com.reserved.daemon.plist <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.reserved.daemon</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/reserved</string>
-    <string>--socket</string><string>/tmp/reserved.sock</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/reserved.log</string>
-  <key>StandardErrorPath</key><string>/tmp/reserved.log</string>
-</dict>
-</plist>
-EOF
-
-launchctl load ~/Library/LaunchAgents/com.reserved.daemon.plist
-
-# 3. Add to shell profile
-echo 'export RESERVED_SOCKET=/tmp/reserved.sock' >> ~/.zshrc
-```
-
-### Linux — system daemon (systemd, root)
-
-```bash
-# 1. Install
-pip install reserved
-sudo mkdir -p /etc/reserved
-# edit /etc/reserved/reserved.json
-
-# 2. Create service account and groups
-sudo groupadd --system reserved
-sudo groupadd gpu-users
-sudo useradd --system --no-create-home --group reserved reserved
-
-# 3. Install unit files
-sudo tee /etc/systemd/system/reserved.socket > /dev/null <<'EOF'
-[Unit]
-Description=reserved resource reservation daemon socket
-[Socket]
-ListenStream=/var/run/reserved.sock
-SocketGroup=gpu-users
-SocketMode=0660
-[Install]
-WantedBy=sockets.target
-EOF
-
-sudo tee /etc/systemd/system/reserved.service > /dev/null <<'EOF'
-[Unit]
-Description=reserved resource reservation daemon
-Requires=reserved.socket
-After=reserved.socket
-[Service]
-ExecStart=/usr/bin/reserved --config /etc/reserved/reserved.json
-User=reserved
-Group=reserved
-Restart=on-failure
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 4. Enable
-sudo systemctl daemon-reload
-sudo systemctl enable --now reserved.socket
-
-# 5. Add users
-sudo usermod -aG gpu-users $USER
-```
-
-### Linux — user daemon (systemd, no root)
-
-```bash
-# 1. Install and create config
-pip install reserved
-mkdir -p ~/.config/reserved
-# edit ~/.config/reserved/reserved.json
-
-# 2. Install unit files
-mkdir -p ~/.config/systemd/user
-
-cat > ~/.config/systemd/user/reserved.socket <<'EOF'
-[Unit]
-Description=reserved resource reservation daemon socket
-[Socket]
-ListenStream=%t/reserved.sock
-[Install]
-WantedBy=sockets.target
-EOF
-
-cat > ~/.config/systemd/user/reserved.service <<'EOF'
-[Unit]
-Description=reserved resource reservation daemon
-Requires=reserved.socket
-After=reserved.socket
-[Service]
-ExecStart=%h/.local/bin/reserved
-Restart=on-failure
-[Install]
-WantedBy=default.target
-EOF
-
-# 3. Enable
-systemctl --user daemon-reload
-systemctl --user enable --now reserved.socket
-echo 'export RESERVED_SOCKET="${XDG_RUNTIME_DIR}/reserved.sock"' >> ~/.bashrc
-```
+The guide covers configuration, client setup, verification, logs, restarts,
+upgrades, rollback, and removal. Ready-to-install systemd units and the launchd
+plist renderer are in [deploy/](deploy/).
 
 ---
 
