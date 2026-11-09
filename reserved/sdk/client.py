@@ -3,6 +3,7 @@ client.py — Python SDK client for the reserved daemon.
 
 Public API:
   Reservation(label, *slots, solver=ConsolidateSolver(), socket_path=None)
+  adopt_inherited_lease()
   Request(*reservations, socket_path=None)
   DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)
   ExplicitSlot(name, *, ram_mb=0, compute_units=0)
@@ -15,6 +16,7 @@ import array
 import os
 import select
 import socket
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -24,13 +26,29 @@ from ..core import (
     SlotRequest,
 )
 from .. import protocol
-from .errors import DaemonNotRunningError, ReservationError, ReservationExpiredError
+from .errors import (
+    DaemonNotRunningError,
+    InheritedLeaseAlreadyAdoptedError,
+    ReservationError,
+    ReservationExpiredError,
+)
 from .solvers import ConsolidateSolver
 
 # Type alias used by solvers.
 ReservationSpec = tuple[str, list]  # (label, list[DeviceConstraint | ExplicitSlot])
 
 _DEFAULT_SOCKET = "/var/run/reserved.sock"
+_inherited_lease_lock = threading.Lock()
+_inherited_lease_adopted = False
+
+
+def _reset_inherited_lease_lock() -> None:
+    # A child cannot inherit a lock held by a thread that did not survive fork.
+    global _inherited_lease_lock
+    _inherited_lease_lock = threading.Lock()
+
+
+os.register_at_fork(after_in_child=_reset_inherited_lease_lock)
 
 
 def _get_socket_path(override: str | None = None) -> str:
@@ -243,13 +261,18 @@ class Reservation:
         self.reservation_id: str | None = None
         self.devices: list[GrantedDevice] = []
         self._lease_sock: socket.socket | None = None
+        self._inherited = False
 
     # ------------------------------------------------------------------
     # Context manager
     # ------------------------------------------------------------------
 
     def __enter__(self) -> "Reservation":
-        self._acquire_single()
+        if self._inherited:
+            if self._lease_sock is None:
+                raise ReservationExpiredError("inherited reservation has already been released")
+        else:
+            self._acquire_single()
         return self
 
     def __exit__(self, *_: Any) -> None:
@@ -356,6 +379,65 @@ class Reservation:
         )
 
 
+def _wrap_inherited_lease(fd_text: str) -> socket.socket:
+    if not fd_text.isascii() or not fd_text.isdecimal():
+        raise ReservationError("RESERVED_FD must be a non-negative decimal file descriptor")
+
+    try:
+        lease_sock = socket.socket(fileno=int(fd_text))
+    except (OSError, OverflowError, ValueError) as exc:
+        raise ReservationError("RESERVED_FD does not name an open socket") from exc
+
+    accepted = False
+    try:
+        if (lease_sock.family, lease_sock.type) != (socket.AF_UNIX, socket.SOCK_STREAM):
+            raise ReservationError("RESERVED_FD must name a Unix stream socket")
+        try:
+            lease_sock.getpeername()
+        except OSError:
+            # macOS can lose the peer address after EOF. Let check() report expiry.
+            if lease_sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) != b"":
+                raise
+        lease_sock.set_inheritable(False)
+        accepted = True
+        return lease_sock
+    except OSError as exc:
+        raise ReservationError("cannot adopt RESERVED_FD as a lease socket") from exc
+    finally:
+        if not accepted:
+            # A rejected descriptor still belongs to its original owner.
+            lease_sock.detach()
+
+
+def adopt_inherited_lease() -> Reservation:
+    """Take ownership of the lease passed by ``reserve`` in ``RESERVED_FD``.
+
+    Use the returned reservation as a context manager or release it explicitly.
+    This claims the existing lease once, clears ``RESERVED_FD``, and marks the
+    descriptor close-on-exec. The reservation carries the launcher ID when
+    available. Its ``devices`` list is empty.
+
+    Raises ReservationError for a missing or invalid descriptor and
+    InheritedLeaseAlreadyAdoptedError if the handoff was already consumed.
+    """
+    global _inherited_lease_adopted
+    with _inherited_lease_lock:
+        if _inherited_lease_adopted:
+            raise InheritedLeaseAlreadyAdoptedError("inherited lease has already been adopted")
+
+        fd_text = os.environ.get("RESERVED_FD")
+        if fd_text is None:
+            raise ReservationError("RESERVED_FD is missing; launch the worker with reserve")
+
+        reservation = Reservation("inherited")
+        reservation.reservation_id = os.environ.get("RESERVED_ID")
+        reservation._inherited = True
+        reservation._lease_sock = _wrap_inherited_lease(fd_text)
+        _inherited_lease_adopted = True
+        os.environ.pop("RESERVED_FD", None)
+        return reservation
+
+
 # ---------------------------------------------------------------------------
 # Request — multi-reservation atomic acquire
 # ---------------------------------------------------------------------------
@@ -393,6 +475,8 @@ class Request:
         """
         if not self._reservations:
             return ()
+        if any(r._inherited for r in self._reservations):
+            raise ReservationError("an inherited reservation cannot be acquired again")
 
         socket_path = _get_socket_path(self._socket_path)
 

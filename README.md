@@ -224,8 +224,8 @@ with Reservation("distributed", DeviceConstraint("cuda"), DeviceConstraint("cuda
 ### Multiple reservations — atomic acquire, independent release
 
 `Request.acquire()` returns reservations that are already acquired. Release them
-in `finally` blocks. The current `Reservation.__enter__()` attempts a fresh
-acquisition, so do not put these returned objects in `with` statements.
+in `finally` blocks. Entering a context with one of those objects attempts a
+fresh acquisition.
 
 ```python
 # Runs against the CPU config in the getting-started walkthrough.
@@ -256,6 +256,31 @@ with Reservation("infer", ExplicitSlot("cuda:2", ram_mb=8192)) as r:
     run_model()
 ```
 
+### Adopt a lease from `reserve`
+
+A Python worker launched by `reserve` can manage the lease it already holds.
+Adopt it at startup and keep the context open while the worker uses the granted
+capacity.
+
+```python
+from reserved import sdk
+
+with sdk.adopt_inherited_lease() as reservation:
+    reservation.check()
+    run_worker()
+```
+
+Adoption takes ownership of `RESERVED_FD` once and removes it from the
+environment. Context exit or explicit `release()` closes the worker's copy of
+the lease. After adoption, the descriptor closes on a later `exec` so another
+executable cannot accidentally keep the grant alive. A forked child still
+gets a copy, so capacity returns when the last copy closes.
+
+The adopted reservation exposes `reservation_id` from `RESERVED_ID` and an
+empty `devices` list. Use the launcher environment to select devices. The
+[getting-started walkthrough](GETTING_STARTED.md#adopt-the-lease-in-a-python-worker)
+shows a worker that requires an inherited lease before it starts work.
+
 ### Checking for daemon restart
 
 Call `check()` at natural checkpoints. Raises `ReservationExpiredError` if the daemon has restarted and the lease is gone.
@@ -269,9 +294,10 @@ with Reservation("train", DeviceConstraint("cuda", ram_mb=16384)) as r:
 
 ### Errors
 
-- `ReservationError` — raised by `acquire()` when the request is rejected (insufficient resources).
+- `ReservationError` — raised for rejected requests or a missing or invalid inherited descriptor.
 - `DaemonNotRunningError` — raised when the daemon socket is not found.
 - `ReservationExpiredError` — raised by `check()` when the daemon has restarted.
+- `InheritedLeaseAlreadyAdoptedError` — raised if the handoff has already been claimed, even after release.
 
 ---
 

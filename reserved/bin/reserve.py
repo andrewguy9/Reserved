@@ -125,6 +125,9 @@ def build_exec_env(
     env["RESERVED_ID"] = reservation_id
     if lease_fd is not None:
         env["RESERVED_FD"] = str(lease_fd)
+    else:
+        # Drop any stale lease number from the environment passed to exec.
+        env.pop("RESERVED_FD", None)
     return env
 
 
