@@ -22,7 +22,7 @@ from reserved.sdk import client
 def handoff(monkeypatch):
     monkeypatch.setattr(client, "_inherited_lease_adopted", False)
     monkeypatch.delenv("RESERVED_FD", raising=False)
-    monkeypatch.delenv("RESERVED_GRANTED_SLOTS", raising=False)
+    monkeypatch.setenv("RESERVED_GRANTED_SLOTS", "[]")
     monkeypatch.setenv("RESERVED_ID", "inherited-id")
 
     def publish(fd):
@@ -76,12 +76,29 @@ def test_adopted_lease_reports_daemon_disconnect(handoff, disconnect_before_adop
             os.close(fd)
             raise
         with reservation:
-            assert reservation.devices == []  # A legacy launcher supplies no structured grants.
+            assert reservation.devices == []  # The handoff explicitly grants zero slots.
             if not disconnect_before_adoption:
                 reservation.check()
                 daemon.close()
             with pytest.raises(sdk.ReservationExpiredError, match="inherited-id"):
                 reservation.check()
+
+
+def test_missing_grant_metadata_leaves_inherited_descriptor_unclaimed(handoff, monkeypatch):
+    worker, daemon = socket.socketpair()
+    with worker, daemon:
+        fd = worker.fileno()
+        worker.set_inheritable(True)
+        handoff(fd)
+        monkeypatch.delenv("RESERVED_GRANTED_SLOTS")
+
+        with pytest.raises(sdk.ReservationError, match="RESERVED_GRANTED_SLOTS is missing"):
+            adopted = sdk.adopt_inherited_lease()
+            worker.detach()
+            adopted.release()
+
+        assert os.environ["RESERVED_FD"] == str(fd)
+        assert worker.get_inheritable()
 
 
 def test_invalid_grant_metadata_leaves_inherited_descriptor_unclaimed(handoff, monkeypatch):

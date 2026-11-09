@@ -283,9 +283,10 @@ executable cannot accidentally keep the grant alive. A forked child still
 gets a copy, so capacity returns when the last copy closes.
 
 The adopted reservation exposes `reservation_id` from `RESERVED_ID` and
-physical grants from `RESERVED_GRANTED_SLOTS`. With an older launcher that
-omits the grant metadata, adoption still manages the lease and `devices`
-is empty. See the [getting-started walkthrough](GETTING_STARTED.md#adopt-the-lease-in-a-python-worker).
+physical grants from `RESERVED_GRANTED_SLOTS`. Update the `reserve` launcher
+and the worker SDK together. Adoption requires this grant metadata and
+accepts an empty array for a reservation with zero slots.
+See the [getting-started walkthrough](GETTING_STARTED.md#adopt-the-lease-in-a-python-worker).
 
 ### PyTorch device selection
 
@@ -300,6 +301,9 @@ Set CUDA visibility before CUDA initializes. The SDK accepts masks made of
 distinct nonnegative decimal ordinals. An empty mask or `-1` hides all CUDA
 devices. Hidden grants, malformed masks, UUID masks, and MIG masks raise
 `ReservationError`.
+
+For PyTorch device selection, use `cpu` or a `cpu:` name for CPU grants and
+`metal:0` for Metal grants. Unsupported device names raise `ReservationError`.
 
 ### Checking for daemon restart
 

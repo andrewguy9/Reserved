@@ -443,9 +443,8 @@ def _wrap_inherited_lease(fd_text: str) -> socket.socket:
 
 
 def _parse_inherited_grants(grants_json: str | None) -> list[GrantedDevice]:
-    # Older launchers supplied only the lease and diagnostic names.
     if grants_json is None:
-        return []
+        raise ReservationError("RESERVED_GRANTED_SLOTS is missing; launch the worker with the updated reserve CLI")
 
     try:
         slots = json.loads(grants_json)
@@ -477,12 +476,12 @@ def adopt_inherited_lease() -> Reservation:
 
     Use the returned reservation as a context manager or release it explicitly.
     This claims the existing lease once, clears ``RESERVED_FD``, and marks the
-    descriptor close-on-exec. The reservation carries the launcher ID and
-    physical grant metadata when available.
+    descriptor close-on-exec. The reservation carries the physical grants
+    from ``RESERVED_GRANTED_SLOTS`` and the launcher ID when available.
 
-    Raises ReservationError for a missing or invalid descriptor or invalid
-    grant metadata, and InheritedLeaseAlreadyAdoptedError if the handoff was
-    already consumed.
+    Raises ReservationError for a missing or invalid descriptor or grant
+    metadata, and InheritedLeaseAlreadyAdoptedError if the handoff was already
+    consumed.
     """
     global _inherited_lease_adopted
     with _inherited_lease_lock:
