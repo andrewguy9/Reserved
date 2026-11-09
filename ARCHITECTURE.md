@@ -170,10 +170,10 @@ sets this up, sets environment variables, and replaces itself with CMD:
 reserve worker type=cuda,ram=8192 -- /path/to/model-env/bin/python worker.py
 ```
 
-CMD inherits the fd and holds the lease for its lifetime without knowing about
-Reserved. The SDK currently has no public API for transferring or adopting a
-lease. An SDK-aware worker can acquire its own reservation and call `check()`
-at checkpoints; the CLI wrapper alone does not stop a command on lease loss.
+CMD inherits the fd and holds the lease while the fd remains open. A Python
+worker can call `adopt_inherited_lease()` once to manage that same lease with
+the SDK. Adoption removes `RESERVED_FD` and restores close-on-exec on the
+descriptor. A worker can call `check()` at checkpoints to detect lease loss.
 See [Getting started](GETTING_STARTED.md#hold-capacity-for-a-model-worker).
 
 ---

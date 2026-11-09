@@ -89,17 +89,39 @@ After it exits, the daemon observes the lease closing and returns availability
 to `1024/1024 MB`. If the final status races with cleanup, query again until the
 reservation disappears.
 
-Try the CLI wrapper against the same daemon:
+### Wrap a command that knows nothing about Reserved
+
+Run this against the same demo daemon:
 
 ```bash
-reserve cli-example type=cpu,ram=256 -- python -m reserved.bin.reserve_status
+reserve cli-example type=cpu,ram=256 -- sleep 5
 reserve-status --json
 ```
 
-The wrapped status command should see its own `cli-example` reservation and
-768 MB available. After it exits, availability returns to 1024 MB and the
-`reservations` array becomes empty. Reserved sets the lease up before replacing
-the wrapper with the command, so the command needs no SDK integration.
+`sleep` holds the lease simply by keeping the inherited descriptor open. Run
+`reserve-status` from another terminal with the same environment and socket
+while it sleeps to see `cli-example` and 768 MB available. After `sleep` exits,
+availability returns to 1024 MB and the `reservations` array becomes empty.
+When a command hands work off to another process, that process must keep a
+lease copy open if it will continue using the reserved capacity after the
+original command exits.
+
+### Adopt the lease in a Python worker
+
+Run the [example worker](examples/inherited_lease_job.py) against the same
+daemon, then run it directly:
+
+```bash
+reserve inherited-example type=cpu,ram=256 -- python examples/inherited_lease_job.py
+python examples/inherited_lease_job.py
+```
+
+The first command prints the reservation ID and checks the lease before each
+batch. The SDK takes ownership of the existing lease and releases it when the
+worker leaves the `with` block. The second command prints `running without a
+reservation` and runs the same batches. The example checks the launch
+environment at startup so that a missing or invalid descriptor in a Reserved
+launch surfaces as an error.
 
 Stop the demo daemon with Ctrl-C in terminal one when finished. All commands in
 the rest of this guide assume a daemon configured for your real hardware; see
@@ -111,6 +133,7 @@ the [resource config reference](README.md#resource-config).
 | --- | --- | --- |
 | Python worker that can check its lease between batches | `Reservation` context manager | The worker |
 | Existing command that needs a reservation and CUDA masking | `reserve LABEL SLOT -- CMD` | The command and any inherited lease copies |
+| Python worker launched by `reserve` that checks or releases its lease | `adopt_inherited_lease()` | The worker and any inherited lease copies |
 | Several reservations that must be granted together | `Request(...).acquire()` | The caller, with explicit `release()` cleanup |
 | Coordinator inspecting capacity | `reserve-status --json` | Status is a snapshot and holds no capacity |
 
@@ -118,18 +141,17 @@ The [CPU example](examples/cpu_job.py) is a complete SDK entry point. The
 [README SDK reference](README.md#python-sdk-reservedsdk) covers constraints,
 explicit placement, and acquiring several reservations together. Use public
 imports from `reserved.sdk`; transport helpers and lease socket attributes are
-private. There is currently no public SDK API for transferring or adopting a
-reservation from another process. A new SDK worker can acquire its own lease.
+private.
 
 After `Request.acquire()`, its returned reservations are already acquired. Use
-`try`/`finally` and `release()` as in the README. The current implementation of
-`with reservation:` attempts a fresh acquisition, including for an already
-acquired reservation.
+`try`/`finally` and `release()` as in the README. Entering a context with one of
+those objects attempts a fresh acquisition.
 
 ## Hold capacity for a model worker
 
-Acquire inside the worker before loading the model. Keep that reservation for
-as long as the model occupies the device, including idle time between batches.
+Acquire or adopt the lease inside the worker before loading the model. Keep
+that reservation for as long as the model occupies the device, including idle
+time between batches.
 Budget for the model plus peak batch memory and other allocations. Supply
 nonnegative amounts: omitted RAM and compute amounts default to zero, which
 claims none of that capacity. Device selection alone does not reserve its RAM.
@@ -155,9 +177,8 @@ reserve model-worker type=cuda,ram=8192 -- /absolute/path/to/model-env/bin/pytho
 
 `model_worker` belongs to the application; Reserved does not provide it. The
 8192 MB budget is illustrative and must be replaced with your measured needs.
-The CLI preserves the lease across exec, but does not monitor or stop the
-command when the daemon dies. Use worker-side SDK acquisition and `check()`
-when you need the public Python lease-loss interface.
+The CLI preserves the lease across exec. Inside `model_worker`, adopt the
+inherited lease and call `check()` at checkpoints to detect daemon shutdown.
 
 ### CUDA device indices
 

@@ -108,7 +108,7 @@ def test_build_exec_env_sets_reservation_metadata_without_mutating_base_env():
 
 def test_build_exec_env_without_cuda_slots_does_not_add_cuda_visible_devices():
     env = build_exec_env(
-        {},
+        {"RESERVED_FD": "9"},
         [{"device_name": "metal:0", "cuda_ordinal": -1}],
         "rid",
         None,
