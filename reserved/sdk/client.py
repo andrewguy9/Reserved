@@ -13,6 +13,7 @@ Public API:
 from __future__ import annotations
 
 import array
+import json
 import os
 import select
 import socket
@@ -88,7 +89,7 @@ class DeviceConstraint:
 @dataclass
 class ExplicitSlot:
     """An explicit slot — directly names a physical device."""
-    name: str
+    name: str  # Physical device name, e.g. "cuda:2".
     ram_mb: int = 0
     compute_units: int = 0
 
@@ -105,26 +106,58 @@ class ExplicitSlot:
 @dataclass
 class GrantedDevice:
     """A physical device slot granted by the daemon."""
-    device_name: str
-    # Physical CUDA ordinal from the device name (e.g. cuda:2 → 2).
-    # Used directly in torch.device("cuda:N"). -1 for non-CUDA devices.
-    cuda_ordinal: int
+    device_name: str  # Physical device name.
+    cuda_ordinal: int  # Physical CUDA ordinal, or -1 for non-CUDA devices.
 
     def torch_device(self) -> Any:
-        """
-        Return an appropriate torch.device for this granted device.
+        """Return the process-local PyTorch device for this physical grant.
 
-        Uses the physical CUDA ordinal directly — CUDA_VISIBLE_DEVICES is not
-        set by the SDK. Use the reserve CLI if you need process-level GPU masking.
+        CUDA uses the grant's logical index within CUDA_VISIBLE_DEVICES. Set
+        the mask before CUDA initializes. Hidden devices, ambiguous masks, and
+        unsupported device kinds raise ReservationError.
         """
-        import torch  # type: ignore[import]
-        dev_type = self.device_name.split(":")[0]
-        if dev_type == "cuda":
-            return torch.device(f"cuda:{self.cuda_ordinal}")
-        elif dev_type == "metal":
-            return torch.device("mps")
+        device_type = self.device_name.partition(":")[0]
+        if self.cuda_ordinal >= 0:
+            logical_index = _logical_cuda_index(
+                self.device_name, self.cuda_ordinal, os.environ.get("CUDA_VISIBLE_DEVICES"),
+            )
+            torch_name = f"cuda:{logical_index}"
+        elif device_type == "metal":
+            torch_name = "mps"
+        elif device_type == "cpu":
+            torch_name = "cpu"
         else:
-            return torch.device("cpu")
+            raise ReservationError(f"unsupported PyTorch device {self.device_name!r}")
+
+        import torch  # type: ignore[import]
+        return torch.device(torch_name)
+
+
+def _logical_cuda_index(physical_name: str, physical_ordinal: int, mask: str | None) -> int:
+    if mask is None:
+        return physical_ordinal
+
+    visible_ordinals: list[int] = []
+    if mask not in ("", "-1"):
+        tokens = mask.split(",")
+        try:
+            if not all(token.isascii() and token.isdecimal() for token in tokens):
+                raise ValueError
+            visible_ordinals = [int(token) for token in tokens]
+            if max(visible_ordinals) > 2**31 - 1 or len(set(visible_ordinals)) != len(tokens):
+                raise ValueError
+        except ValueError as exc:
+            raise ReservationError(
+                f"cannot map physical device {physical_name!r}: invalid "
+                f"CUDA_VISIBLE_DEVICES={mask!r}; expected distinct numeric CUDA ordinals"
+            ) from exc
+
+    try:
+        return visible_ordinals.index(physical_ordinal)
+    except ValueError as exc:
+        raise ReservationError(
+            f"physical device {physical_name!r} is not visible in CUDA_VISIBLE_DEVICES={mask!r}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +290,7 @@ class Reservation:
         self._solver = solver if solver is not None else ConsolidateSolver()
         self._socket_path = socket_path
 
-        # Set after acquire.
+        # Physical grant metadata set after acquisition or adoption.
         self.reservation_id: str | None = None
         self.devices: list[GrantedDevice] = []
         self._lease_sock: socket.socket | None = None
@@ -368,7 +401,7 @@ class Reservation:
                 )
 
     def torch_devices(self) -> list[Any]:
-        """Convenience: return a list of torch.device for all granted slots."""
+        """Return process-local PyTorch devices in physical grant order."""
         return [d.torch_device() for d in self.devices]
 
     def __repr__(self) -> str:
@@ -409,16 +442,47 @@ def _wrap_inherited_lease(fd_text: str) -> socket.socket:
             lease_sock.detach()
 
 
+def _parse_inherited_grants(grants_json: str | None) -> list[GrantedDevice]:
+    # Older launchers supplied only the lease and diagnostic names.
+    if grants_json is None:
+        return []
+
+    try:
+        slots = json.loads(grants_json)
+        if not isinstance(slots, list):
+            raise ValueError
+
+        devices: list[GrantedDevice] = []
+        for slot in slots:
+            if not isinstance(slot, dict):
+                raise ValueError
+            physical_name = slot.get("device_name")
+            physical_ordinal = slot.get("cuda_ordinal")
+            if not isinstance(physical_name, str) or type(physical_ordinal) is not int:
+                raise ValueError
+            if physical_ordinal < -1:
+                raise ValueError
+            if physical_ordinal >= 0:
+                kind, _, ordinal_text = physical_name.partition(":")
+                if kind != "cuda" or int(ordinal_text) != physical_ordinal:
+                    raise ValueError
+            devices.append(GrantedDevice(physical_name, physical_ordinal))
+        return devices
+    except (RecursionError, ValueError) as exc:
+        raise ReservationError("RESERVED_GRANTED_SLOTS contains invalid physical grant metadata") from exc
+
+
 def adopt_inherited_lease() -> Reservation:
     """Take ownership of the lease passed by ``reserve`` in ``RESERVED_FD``.
 
     Use the returned reservation as a context manager or release it explicitly.
     This claims the existing lease once, clears ``RESERVED_FD``, and marks the
-    descriptor close-on-exec. The reservation carries the launcher ID when
-    available. Its ``devices`` list is empty.
+    descriptor close-on-exec. The reservation carries the launcher ID and
+    physical grant metadata when available.
 
-    Raises ReservationError for a missing or invalid descriptor and
-    InheritedLeaseAlreadyAdoptedError if the handoff was already consumed.
+    Raises ReservationError for a missing or invalid descriptor or invalid
+    grant metadata, and InheritedLeaseAlreadyAdoptedError if the handoff was
+    already consumed.
     """
     global _inherited_lease_adopted
     with _inherited_lease_lock:
@@ -431,6 +495,7 @@ def adopt_inherited_lease() -> Reservation:
 
         reservation = Reservation("inherited")
         reservation.reservation_id = os.environ.get("RESERVED_ID")
+        reservation.devices = _parse_inherited_grants(os.environ.get("RESERVED_GRANTED_SLOTS"))
         reservation._inherited = True
         reservation._lease_sock = _wrap_inherited_lease(fd_text)
         _inherited_lease_adopted = True

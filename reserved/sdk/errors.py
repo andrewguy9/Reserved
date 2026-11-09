@@ -4,7 +4,7 @@ errors.py — Exception types for the reserved SDK.
 
 
 class ReservationError(Exception):
-    """Base error for reservation acquisition and lease lifecycle operations."""
+    """Base error for reservation acquisition, lease operations, and device mapping."""
 
 
 class DaemonNotRunningError(ReservationError):
