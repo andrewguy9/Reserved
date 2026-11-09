@@ -180,13 +180,31 @@ inherited lease and call `check()` at checkpoints to detect daemon shutdown.
 ### CUDA device indices
 
 The CLI sets `CUDA_VISIBLE_DEVICES` to granted physical ordinals. A worker
-granted physical `cuda:2` sees `CUDA_VISIBLE_DEVICES=2` and uses logical
-`cuda:0` inside PyTorch. `RESERVED_DEVICE` still names the physical device.
+launched with `reserve model-worker name=cuda:2 -- python -m model_worker`
+sees `RESERVED_DEVICE=cuda:2`, `RESERVED_DEVICES=cuda:2`, and
+`CUDA_VISIBLE_DEVICES=2`.
 
-The SDK leaves `CUDA_VISIBLE_DEVICES` unchanged. Its `torch_device()` helper
-returns the physical ordinal. Use that directly only when the worker has an
-unmasked CUDA view; an existing mask needs an explicit physical-to-logical
-mapping in the application. See [CUDA device indexing](ARCHITECTURE.md#cuda-device-indexing).
+```python
+from reserved import sdk
+
+with sdk.adopt_inherited_lease() as reservation:
+    (device,) = reservation.torch_devices()  # torch.device("cuda:0")
+    run_worker(device)
+```
+
+Use `torch_devices()` the same way with an SDK-acquired reservation. The helper
+reads the process's existing CUDA visibility and returns PyTorch devices in
+grant order. `reservation.devices` holds the physical grant names for
+diagnostics.
+
+| Physical grant in `reservation.devices` | Process's `CUDA_VISIBLE_DEVICES` | Logical PyTorch device |
+| --- | --- | --- |
+| `cuda:2` | Unset | `cuda:2` |
+| `cuda:2` | `2` | `cuda:0` |
+| `cuda:2` | `5,2` | `cuda:1` |
+
+Set visibility before CUDA initializes.
+See [CUDA device indexing](ARCHITECTURE.md#cuda-device-indexing).
 
 ## Handle failures
 
@@ -195,6 +213,7 @@ mapping in the application. See [CUDA device indexing](ARCHITECTURE.md#cuda-devi
 | `DaemonNotRunningError`, or a CLI daemon-connection error with exit code 2 | Start or locate the daemon and check the socket setting. |
 | `ReservationError` during acquisition, or `reserve` exit code 1 for a rejected request | Inspect the reason and current status. Fix invalid requests; retry capacity shortages according to application policy. |
 | `ReservationExpiredError` from `check()` | Stop using the invalid lease and recover the work through the application. |
+| `ReservationError` from `torch_devices()` for a hidden CUDA grant or invalid mask | Check the physical grant name and the process's CUDA visibility. |
 | Capacity remains claimed after a worker exits | Check whether a child or another process still holds a lease copy. |
 
 `DaemonNotRunningError` and `ReservationExpiredError` inherit from

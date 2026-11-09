@@ -151,7 +151,7 @@ Each `SLOT` is a comma-separated set of constraints:
 | `model=MODEL` | Device model label (e.g. `rtx3090`) |
 | `ram=MB` | Minimum available RAM in MB |
 | `compute=N` | Minimum available compute units |
-| `name=NAME` | Pin to a specific device by name |
+| `name=NAME` | Pin to a physical device by its configured name |
 
 ```bash
 # Any CUDA device
@@ -166,7 +166,7 @@ reserve train type=cuda,ram=30720 -- python train.py
 # Specific model
 reserve infer type=cuda,model=rtx3090 -- python infer.py
 
-# Pin to a specific device
+# Pin to a physical device
 reserve infer name=cuda:2 -- python infer.py
 
 # Two CUDA devices (distributed job)
@@ -180,11 +180,16 @@ reserve pipeline --solver spread type=cuda type=cuda -- python pipeline.py
 
 | Variable | Value |
 | --- | --- |
-| `CUDA_VISIBLE_DEVICES` | Physical CUDA ordinals of granted devices (e.g. `2` or `2,3`) |
-| `RESERVED_DEVICE` | Physical name of the first granted accelerator |
-| `RESERVED_DEVICES` | Comma-separated physical names of all granted devices |
+| `CUDA_VISIBLE_DEVICES` | Distinct physical CUDA ordinals in first-grant order, defining the child's CUDA view |
+| `RESERVED_DEVICE` | Physical name of the first granted accelerator, or the first device for a CPU-only grant |
+| `RESERVED_DEVICES` | Comma-separated physical device names in grant order |
+| `RESERVED_GRANTED_SLOTS` | JSON array of physical grant metadata for SDK adoption |
 | `RESERVED_ID` | Reservation ID |
 | `RESERVED_FD` | File descriptor number of the lease fd |
+
+For `reserve infer name=cuda:2 -- python infer.py`, the daemon grants physical
+`cuda:2`. The worker sees `RESERVED_DEVICE=cuda:2`, `RESERVED_DEVICES=cuda:2`,
+and `CUDA_VISIBLE_DEVICES=2`. PyTorch uses logical `cuda:0` in that process.
 
 ---
 
@@ -250,7 +255,7 @@ that capacity before releasing it; Reserved does not free GPU memory itself.
 ### Explicit placement (orchestrator)
 
 ```python
-# Pin directly to named devices — bypasses solver
+# Pin directly to a physical device
 with Reservation("infer", ExplicitSlot("cuda:2", ram_mb=8192)) as r:
     model.to(r.devices[0].torch_device())
     run_model()
@@ -267,7 +272,8 @@ from reserved import sdk
 
 with sdk.adopt_inherited_lease() as reservation:
     reservation.check()
-    run_worker()
+    (device,) = reservation.torch_devices()
+    run_worker(device)
 ```
 
 Adoption takes ownership of `RESERVED_FD` once and removes it from the
@@ -276,10 +282,28 @@ the lease. After adoption, the descriptor closes on a later `exec` so another
 executable cannot accidentally keep the grant alive. A forked child still
 gets a copy, so capacity returns when the last copy closes.
 
-The adopted reservation exposes `reservation_id` from `RESERVED_ID` and an
-empty `devices` list. Use the launcher environment to select devices. The
-[getting-started walkthrough](GETTING_STARTED.md#adopt-the-lease-in-a-python-worker)
-shows a worker that requires an inherited lease before it starts work.
+The adopted reservation exposes `reservation_id` from `RESERVED_ID` and
+physical grants from `RESERVED_GRANTED_SLOTS`. Update the `reserve` launcher
+and the worker SDK together. Adoption requires this grant metadata and
+accepts an empty array for a reservation with zero slots.
+See the [getting-started walkthrough](GETTING_STARTED.md#adopt-the-lease-in-a-python-worker).
+
+### PyTorch device selection
+
+For either acquisition path, `reservation.devices` holds physical grant
+metadata for placement and diagnostics. Pass the result of
+`reservation.torch_devices()` to PyTorch. It returns one process-local device
+per granted slot, in grant order. For example, with `CUDA_VISIBLE_DEVICES=5,2`,
+physical `cuda:2` becomes logical `cuda:1`. When the mask is unset, the
+helper uses the physical ordinal as the PyTorch index.
+
+Set CUDA visibility before CUDA initializes. The SDK accepts masks made of
+distinct nonnegative decimal ordinals. An empty mask or `-1` hides all CUDA
+devices. Hidden grants, malformed masks, UUID masks, and MIG masks raise
+`ReservationError`.
+
+For PyTorch device selection, use `cpu` or a `cpu:` name for CPU grants and
+`metal:0` for Metal grants. Unsupported device names raise `ReservationError`.
 
 ### Checking for daemon restart
 
@@ -294,7 +318,7 @@ with Reservation("train", DeviceConstraint("cuda", ram_mb=16384)) as r:
 
 ### Errors
 
-- `ReservationError` — raised for rejected requests or a missing or invalid inherited descriptor.
+- `ReservationError` — raised for rejected requests, invalid inherited handoffs, or PyTorch device mapping errors.
 - `DaemonNotRunningError` — raised when the daemon socket is not found.
 - `ReservationExpiredError` — raised by `check()` when the daemon has restarted.
 - `InheritedLeaseAlreadyAdoptedError` — raised if the handoff has already been claimed, even after release.
@@ -331,7 +355,7 @@ Devices have the following fields:
 
 | Field | Description |
 | --- | --- |
-| `name` | Unique identifier. CUDA: must be `cuda:N` matching `nvidia-smi` index. Metal: use `metal:0`. |
+| `name` | Unique physical identifier. CUDA uses `cuda:N` with the physical ordinal. Metal uses `metal:0`. |
 | `type` | `cuda`, `metal`, or `cpu` |
 | `model` | Optional label for the hardware class |
 | `ram_mb` | Total reservable RAM (VRAM for CUDA, unified memory for Metal, system RAM for CPU) |
