@@ -172,8 +172,11 @@ reserve worker type=cuda,ram=8192 -- /path/to/model-env/bin/python worker.py
 
 CMD inherits the fd and holds the lease while the fd remains open. A Python
 worker can call `adopt_inherited_lease()` once to manage that same lease with
-the SDK. Adoption removes `RESERVED_FD` and restores close-on-exec on the
-descriptor. A worker can call `check()` at checkpoints to detect lease loss.
+the SDK. Adoption removes `RESERVED_FD` from the worker's environment and from
+the environment inherited by later children. The descriptor closes on a later
+`exec`, so an unrelated executable cannot extend the lease. A child that only
+forks still holds a descriptor copy. To hand off a lease across `exec`, do so
+before adopting it in the process that will manage its lifetime.
 See [Getting started](GETTING_STARTED.md#hold-capacity-for-a-model-worker).
 
 ---

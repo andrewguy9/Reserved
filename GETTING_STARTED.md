@@ -108,20 +108,17 @@ original command exits.
 
 ### Adopt the lease in a Python worker
 
-Run the [example worker](examples/inherited_lease_job.py) against the same
-daemon, then run it directly:
+Launch the [example worker](examples/inherited_lease_job.py) against the same
+daemon:
 
 ```bash
 reserve inherited-example type=cpu,ram=256 -- python examples/inherited_lease_job.py
-python examples/inherited_lease_job.py
 ```
 
-The first command prints the reservation ID and checks the lease before each
-batch. The SDK takes ownership of the existing lease and releases it when the
-worker leaves the `with` block. The second command prints `running without a
-reservation` and runs the same batches. The example checks the launch
-environment at startup so that a missing or invalid descriptor in a Reserved
-launch surfaces as an error.
+The worker adopts the lease at startup and prints its reservation ID at each
+batch checkpoint. It releases its copy when it leaves the `with` block. A
+missing or invalid inherited descriptor raises `ReservationError` before the
+worker reaches its first batch.
 
 Stop the demo daemon with Ctrl-C in terminal one when finished. All commands in
 the rest of this guide assume a daemon configured for your real hardware; see

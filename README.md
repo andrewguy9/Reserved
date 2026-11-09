@@ -272,13 +272,14 @@ with sdk.adopt_inherited_lease() as reservation:
 
 Adoption takes ownership of `RESERVED_FD` once and removes it from the
 environment. Context exit or explicit `release()` closes the worker's copy of
-the lease. The descriptor is close-on-exec after adoption. A forked child can
-still hold a copy, so capacity returns when the last copy closes.
+the lease. After adoption, the descriptor closes on a later `exec` so another
+executable cannot accidentally keep the grant alive. A forked child still
+gets a copy, so capacity returns when the last copy closes.
 
 The adopted reservation exposes `reservation_id` from `RESERVED_ID` and an
 empty `devices` list. Use the launcher environment to select devices. The
 [getting-started walkthrough](GETTING_STARTED.md#adopt-the-lease-in-a-python-worker)
-shows the same worker launched with and without `reserve`.
+shows a worker that requires an inherited lease before it starts work.
 
 ### Checking for daemon restart
 
