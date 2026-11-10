@@ -17,6 +17,10 @@ from .errors import (
     ReservationExpiredError,
 )
 from .solvers import ConsolidateSolver, SpreadSolver
+from .planner import (
+    Backlog, OwnedWorker, WorkerPlan, WorkerShortfall, WorkerStart,
+    plan_workers, recommend_workers,
+)
 
 __all__ = [
     "Reservation",
@@ -27,6 +31,13 @@ __all__ = [
     "GrantedDevice",
     "ConsolidateSolver",
     "SpreadSolver",
+    "Backlog",
+    "OwnedWorker",
+    "WorkerPlan",
+    "WorkerShortfall",
+    "WorkerStart",
+    "plan_workers",
+    "recommend_workers",
     "ReservationError",
     "DaemonNotRunningError",
     "ReservationExpiredError",
