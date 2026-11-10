@@ -91,17 +91,36 @@ After it exits, the daemon observes the lease closing and returns availability
 to `1024/1024 MB`. If the final status races with cleanup, query again until the
 reservation disappears.
 
-Try the CLI wrapper against the same daemon:
+### Wrap a command that knows nothing about Reserved
+
+Run this against the same demo daemon:
 
 ```bash
-reserve cli-example type=cpu,ram=256 -- python -m reserved.bin.reserve_status
+reserve cli-example type=cpu,ram=256 -- sleep 5
 reserve-status --json
 ```
 
-The wrapped status command should see its own `cli-example` reservation and
-768 MB available. After it exits, availability returns to 1024 MB and the
-`reservations` array becomes empty. Reserved sets the lease up before replacing
-the wrapper with the command, so the command needs no SDK integration.
+`sleep` holds the lease simply by keeping the inherited descriptor open. Run
+`reserve-status` from another terminal with the same environment and socket
+while it sleeps to see `cli-example` and 768 MB available. After `sleep` exits,
+availability returns to 1024 MB and the `reservations` array becomes empty.
+When a command hands work off to another process, that process must keep a
+lease copy open if it will continue using the reserved capacity after the
+original command exits.
+
+### Adopt the lease in a Python worker
+
+Launch the [example worker](examples/inherited_lease_job.py) against the same
+daemon:
+
+```bash
+reserve inherited-example type=cpu,ram=256 -- python examples/inherited_lease_job.py
+```
+
+The worker adopts the lease at startup and prints its reservation ID at each
+batch checkpoint. It releases its copy when it leaves the `with` block. A
+missing or invalid inherited descriptor raises `ReservationError` before the
+worker reaches its first batch.
 
 Stop the demo daemon with Ctrl-C in terminal one when finished. For real
 workloads, configure the daemon for your hardware using the
@@ -114,6 +133,7 @@ below uses its own CPU accounting budget and socket.
 | --- | --- | --- |
 | Python worker that can check its lease between batches | `Reservation` context manager | The worker |
 | Existing command that needs a reservation and CUDA masking | `reserve LABEL SLOT -- CMD` | The command and any inherited lease copies |
+| Python worker launched by `reserve` that checks or releases its lease | `adopt_inherited_lease()` | The worker and any inherited lease copies |
 | Several reservations that must be granted together | `Request(...).acquire()` | The caller, with explicit `release()` cleanup |
 | Application managing a pool of batched workers | `recommend_workers()` and `Request(...).acquire()` | The application, through loading, processing, draining, and teardown |
 | Coordinator inspecting capacity | `reserve-status --json` | Status is a snapshot and holds no capacity |
@@ -122,13 +142,11 @@ The [CPU example](examples/cpu_job.py) is a complete SDK entry point. The
 [README SDK reference](README.md#python-sdk-reservedsdk) covers constraints,
 explicit placement, and acquiring several reservations together. Use public
 imports from `reserved.sdk`; transport helpers and lease socket attributes are
-private. There is currently no public SDK API for transferring or adopting a
-reservation from another process. A new SDK worker can acquire its own lease.
+private.
 
 After `Request.acquire()`, its returned reservations are already acquired. Use
-`try`/`finally` and `release()` as in the README. The current implementation of
-`with reservation:` attempts a fresh acquisition, including for an already
-acquired reservation.
+`try`/`finally` and `release()` as in the README. Entering a context with one of
+those objects attempts a fresh acquisition.
 
 ## Plan a pool of batched workers
 
@@ -178,8 +196,9 @@ process supervision, and acquisition retries.
 
 ## Hold capacity for a model worker
 
-Acquire inside the worker before loading the model. Keep that reservation for
-as long as the model occupies the device, including idle time between batches.
+Acquire or adopt the lease inside the worker before loading the model. Keep
+that reservation for as long as the model occupies the device, including idle
+time between batches.
 Budget for the model plus peak batch memory and other allocations. Supply
 nonnegative amounts: omitted RAM and compute amounts default to zero, which
 claims none of that capacity. Device selection alone does not reserve its RAM.
@@ -205,20 +224,37 @@ reserve model-worker type=cuda,ram=8192 -- /absolute/path/to/model-env/bin/pytho
 
 `model_worker` belongs to the application; Reserved does not provide it. The
 8192 MB budget is illustrative and must be replaced with your measured needs.
-The CLI preserves the lease across exec, but does not monitor or stop the
-command when the daemon dies. Use worker-side SDK acquisition and `check()`
-when you need the public Python lease-loss interface.
+The CLI preserves the lease across exec. Inside `model_worker`, adopt the
+inherited lease and call `check()` at checkpoints to detect daemon shutdown.
 
 ### CUDA device indices
 
 The CLI sets `CUDA_VISIBLE_DEVICES` to granted physical ordinals. A worker
-granted physical `cuda:2` sees `CUDA_VISIBLE_DEVICES=2` and uses logical
-`cuda:0` inside PyTorch. `RESERVED_DEVICE` still names the physical device.
+launched with `reserve model-worker name=cuda:2 -- python -m model_worker`
+sees `RESERVED_DEVICE=cuda:2`, `RESERVED_DEVICES=cuda:2`, and
+`CUDA_VISIBLE_DEVICES=2`.
 
-The SDK leaves `CUDA_VISIBLE_DEVICES` unchanged. Its `torch_device()` helper
-returns the physical ordinal. Use that directly only when the worker has an
-unmasked CUDA view; an existing mask needs an explicit physical-to-logical
-mapping in the application. See [CUDA device indexing](ARCHITECTURE.md#cuda-device-indexing).
+```python
+from reserved import sdk
+
+with sdk.adopt_inherited_lease() as reservation:
+    (device,) = reservation.torch_devices()  # torch.device("cuda:0")
+    run_worker(device)
+```
+
+Use `torch_devices()` the same way with an SDK-acquired reservation. The helper
+reads the process's existing CUDA visibility and returns PyTorch devices in
+grant order. `reservation.devices` holds the physical grant names for
+diagnostics.
+
+| Physical grant in `reservation.devices` | Process's `CUDA_VISIBLE_DEVICES` | Logical PyTorch device |
+| --- | --- | --- |
+| `cuda:2` | Unset | `cuda:2` |
+| `cuda:2` | `2` | `cuda:0` |
+| `cuda:2` | `5,2` | `cuda:1` |
+
+Set visibility before CUDA initializes.
+See [CUDA device indexing](ARCHITECTURE.md#cuda-device-indexing).
 
 ## Handle failures
 
@@ -227,6 +263,7 @@ mapping in the application. See [CUDA device indexing](ARCHITECTURE.md#cuda-devi
 | `DaemonNotRunningError`, or a CLI daemon-connection error with exit code 2 | Start or locate the daemon and check the socket setting. |
 | `ReservationError` during acquisition, or `reserve` exit code 1 for a rejected request | Inspect the reason and current status. Fix invalid requests; retry capacity shortages according to application policy. |
 | `ReservationExpiredError` from `check()` | Stop using the invalid lease and recover the work through the application. |
+| `ReservationError` from `torch_devices()` for a hidden CUDA grant or invalid mask | Check the physical grant name and the process's CUDA visibility. |
 | Capacity remains claimed after a worker exits | Check whether a child or another process still holds a lease copy. |
 
 `DaemonNotRunningError` and `ReservationExpiredError` inherit from

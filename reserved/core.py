@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 
 @dataclass(frozen=True)
 class Device:
-    name: str
+    name: str  # Physical device name.
     type: str
     model: str | None
     ram_mb: int
@@ -57,12 +57,8 @@ class ReserveRequest:
 @dataclass(frozen=True)
 class GrantedSlot:
     """One granted slot in a successful reservation."""
-    device_name: str
-    # Physical CUDA ordinal extracted from the device name (e.g. cuda:2 → 2).
-    # Set in CUDA_VISIBLE_DEVICES so the child process sees only granted devices.
-    # The child addresses them as cuda:0, cuda:1, ... (logical indices within
-    # whatever CUDA_VISIBLE_DEVICES exposes). -1 for non-CUDA devices.
-    cuda_ordinal: int
+    device_name: str  # Physical device name.
+    cuda_ordinal: int  # Physical CUDA ordinal, or -1 for non-CUDA devices.
 
 
 @dataclass(frozen=True)
@@ -79,7 +75,7 @@ class ActiveReservation:
 
     @dataclass(frozen=True)
     class ClaimedSlot:
-        device_name: str
+        device_name: str  # Physical device name.
         ram_mb: int
         compute_units: int
 
@@ -116,7 +112,7 @@ GrantResult = GrantSuccess | GrantFailure
 
 @dataclass(frozen=True)
 class DeviceStatus:
-    name: str
+    name: str  # Physical device name.
     type: str
     model: str | None
     ram_mb: int

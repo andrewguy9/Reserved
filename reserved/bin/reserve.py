@@ -12,7 +12,7 @@ SLOT format: comma-separated key=value pairs.
     ram_mb=MB        RAM in MB
     compute=N        Compute units (alias for compute_units)
     compute_units=N  Compute units
-    name=NAME        Pin to a specific device (bypasses solver)
+    name=NAME        Pin to a physical device (bypasses solver)
 
 Examples:
     reserve train type=cuda,ram=8192 -- python train.py
@@ -23,6 +23,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -55,12 +56,12 @@ def parse_slot(spec: str) -> DeviceConstraint | ExplicitSlot:
         key, _, value = part.partition("=")
         fields[key.strip()] = value.strip()
 
-    name = fields.get("name")
-    if name is not None:
+    physical_name = fields.get("name")
+    if physical_name is not None:
         # Explicit slot.
         ram_mb = int(fields.get("ram", fields.get("ram_mb", 0)))
         compute_units = int(fields.get("compute", fields.get("compute_units", 0)))
-        return ExplicitSlot(name=name, ram_mb=ram_mb, compute_units=compute_units)
+        return ExplicitSlot(name=physical_name, ram_mb=ram_mb, compute_units=compute_units)
     else:
         # Constraint slot.
         return DeviceConstraint(
@@ -101,30 +102,35 @@ def build_exec_env(
     reservation_id: str,
     lease_fd: int | None,
 ) -> dict[str, str]:
-    """Build the environment passed to the reserved child process."""
+    """Pass physical grants and CUDA visibility to the child process."""
     seen: set[str] = set()
-    cuda_indices: list[str] = []
+    physical_cuda_ordinals: list[str] = []
     for s in granted_slots:
         if s["cuda_ordinal"] >= 0:
-            ordinal = str(s["cuda_ordinal"])
-            if ordinal not in seen:
-                seen.add(ordinal)
-                cuda_indices.append(ordinal)
+            physical_ordinal = str(s["cuda_ordinal"])
+            if physical_ordinal not in seen:
+                seen.add(physical_ordinal)
+                physical_cuda_ordinals.append(physical_ordinal)
 
-    all_device_names = [s["device_name"] for s in granted_slots]
+    physical_names = [s["device_name"] for s in granted_slots]
     first_accel = next(
-        (s["device_name"] for s in granted_slots if not s["device_name"].startswith("cpu")),
-        all_device_names[0] if all_device_names else "",
+        (name for name in physical_names if not name.startswith("cpu")),
+        physical_names[0] if physical_names else "",
     )
 
     env = base_env.copy()
-    if cuda_indices:
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_indices)
+    if physical_cuda_ordinals:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(physical_cuda_ordinals)
     env["RESERVED_DEVICE"] = first_accel
-    env["RESERVED_DEVICES"] = ",".join(all_device_names)
+    env["RESERVED_DEVICES"] = ",".join(physical_names)
+    # Preserve slot boundaries even when a configured name contains a comma.
+    env["RESERVED_GRANTED_SLOTS"] = json.dumps(granted_slots, separators=(",", ":"))
     env["RESERVED_ID"] = reservation_id
     if lease_fd is not None:
         env["RESERVED_FD"] = str(lease_fd)
+    else:
+        # Drop any stale lease number from the environment passed to exec.
+        env.pop("RESERVED_FD", None)
     return env
 
 
@@ -149,7 +155,7 @@ def main() -> None:
         "slots",
         nargs="*",
         metavar="SLOT",
-        help="Device constraints (type=TYPE,ram=MB,...)",
+        help="Device constraints (type=TYPE,ram=MB,...) or physical device (name=NAME)",
     )
     parser.add_argument(
         "--solver",

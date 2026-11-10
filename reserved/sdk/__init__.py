@@ -2,8 +2,20 @@
 reserved SDK — Python client library for the reserved daemon.
 """
 
-from .client import DeviceConstraint, ExplicitSlot, GrantedDevice, Request, Reservation
-from .errors import DaemonNotRunningError, ReservationError, ReservationExpiredError
+from .client import (
+    DeviceConstraint,
+    ExplicitSlot,
+    GrantedDevice,
+    Request,
+    Reservation,
+    adopt_inherited_lease,
+)
+from .errors import (
+    DaemonNotRunningError,
+    InheritedLeaseAlreadyAdoptedError,
+    ReservationError,
+    ReservationExpiredError,
+)
 from .solvers import ConsolidateSolver, SpreadSolver
 from .planner import (
     Backlog, OwnedWorker, WorkerPlan, WorkerShortfall, WorkerStart,
@@ -12,6 +24,7 @@ from .planner import (
 
 __all__ = [
     "Reservation",
+    "adopt_inherited_lease",
     "Request",
     "DeviceConstraint",
     "ExplicitSlot",
@@ -28,4 +41,5 @@ __all__ = [
     "ReservationError",
     "DaemonNotRunningError",
     "ReservationExpiredError",
+    "InheritedLeaseAlreadyAdoptedError",
 ]
