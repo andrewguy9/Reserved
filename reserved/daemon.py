@@ -538,24 +538,26 @@ def _acquire_socket_systemd() -> socket.socket | None:
 
 def _resolve_config(flag: str | None) -> str:
     """Return the config file path using the documented fallback chain."""
+    overrides = (flag, os.environ.get("RESERVED_CONFIG"))
     defaults = (
         os.path.expanduser("~/.config/reserved/reserved.json"),
         "/etc/reserved/reserved.json",
     )
-    path = flag or os.environ.get("RESERVED_CONFIG") or next(
-        (candidate for candidate in defaults if os.path.isfile(candidate)), None
+    for path in overrides + defaults:
+        if not path:
+            continue
+        if os.path.isfile(path):
+            return path
+        if path in overrides:
+            print(f"error: config file not found: {path}", file=sys.stderr)
+            sys.exit(1)
+
+    print(
+        f"error: no config file found. Searched: {', '.join(defaults)}\n"
+        "Pass --config PATH or set RESERVED_CONFIG.",
+        file=sys.stderr,
     )
-    if path is None:
-        print(
-            f"error: no config file found. Searched: {', '.join(defaults)}\n"
-            "Pass --config PATH or set RESERVED_CONFIG.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    if not os.path.isfile(path):
-        print(f"error: config file not found: {path}", file=sys.stderr)
-        sys.exit(1)
-    return path
+    sys.exit(1)
 
 
 def main(argv: list[str] | None = None) -> None:
