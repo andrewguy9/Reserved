@@ -3,11 +3,11 @@ Example: acquire an Apple Silicon Metal/MPS reservation from Python.
 
 Start a daemon with:
 
-    reserved --config examples/m2_mac.json --socket /tmp/reserved.sock
+    reserved --config examples/m2_mac.json
 
 Then run:
 
-    RESERVED_SOCKET=/tmp/reserved.sock python3 examples/metal_job.py
+    python3 examples/metal_job.py
 """
 
 from reserved.sdk.client import DeviceConstraint, Reservation

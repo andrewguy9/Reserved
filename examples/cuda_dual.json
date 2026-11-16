@@ -1,0 +1,6 @@
+{
+  "devices": [
+    { "name": "cuda:0", "type": "cuda", "ram_mb": 8192 },
+    { "name": "cuda:1", "type": "cuda", "ram_mb": 8192 }
+  ]
+}

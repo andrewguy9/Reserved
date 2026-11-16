@@ -286,7 +286,7 @@ If the `LISTEN_FDS` environment variable is set, systemd has already created and
 
 If `LISTEN_FDS` is not set, the daemon creates and binds the socket itself:
 
-- Path: `--socket PATH` flag, default `/var/run/reserved.sock`
+- Path: `--socket PATH` flag, with [shared platform-aware discovery](INSTALL.md#socket-and-config-discovery)
 - Permissions: `0660` by default
 - Group: `--socket-group GROUP` sets the socket file's group, allowing non-root users
 
@@ -542,7 +542,7 @@ Arguments:
 Options:
   --solver NAME     Constraint solver to use: consolidate (default) or spread.
                     Ignored when all slots use name= (explicit placement).
-  --socket PATH     Daemon socket path [default: /var/run/reserved.sock]
+  --socket PATH     Daemon socket path [shared platform-aware default; see INSTALL.md]
 ```
 
 All slots belong to the single reservation and are granted atomically — all or none.
@@ -753,7 +753,8 @@ for epoch in range(num_epochs):
 
 1. Constructor kwargs (`socket_path=`)
 2. Environment variable `RESERVED_SOCKET` for socket path
-3. Default: `/var/run/reserved.sock`
+3. `$XDG_RUNTIME_DIR/reserved.sock` when set.
+4. `/tmp/reserved-<uid>.sock` on macOS, otherwise `/var/run/reserved.sock`.
 
 ---
 
@@ -803,253 +804,15 @@ reserve-status --json | jq '.reservations | length'
 
 ## Deployment
 
-### Config file discovery
+The authoritative installation and operations guide is [INSTALL.md](INSTALL.md).
+It includes Linux system and user systemd services, a macOS launchd user agent,
+source installation into virtual environments, client setup, verification,
+upgrades, and removal. Service definitions live in [deploy/](deploy/).
 
-The daemon searches for its config file in this order, using the first one found:
-
-1. `--config PATH` command-line flag
-2. `RESERVED_CONFIG` environment variable
-3. `~/.config/reserved/reserved.json` (user config)
-4. `/etc/reserved/reserved.json` (system config)
-
-### Socket path discovery
-
-The daemon and all clients (SDK, CLIs) discover the socket path using the same priority order:
-
-1. `--socket PATH` flag (daemon) / `socket_path=` kwarg (SDK)
-2. `RESERVED_SOCKET` environment variable
-3. `$XDG_RUNTIME_DIR/reserved.sock` (user daemon on Linux, e.g. `/var/run/user/1000/reserved.sock`)
-4. `/var/run/reserved.sock` (system daemon)
-
-`RESERVED_SOCKET` is the recommended way to point clients at a non-default socket. Set it in the shell profile or systemd environment for all processes on the machine to pick it up automatically.
-
-### Stale socket cleanup
-
-On startup, if the socket file already exists, the daemon probes it with a test connection:
-
-- If the connection is accepted: another instance is already running. The daemon exits with an error.
-- If the connection is refused: the socket is a stale artifact from a previous crash. The daemon removes it and binds a fresh one.
-
-This means operators can safely restart a crashed daemon without manually cleaning up the socket file.
-
-### Signal handling
-
-- `SIGTERM` — graceful shutdown. The daemon logs all active reservations (label, age, devices held) so operators can see what work will be disrupted, then exits.
-- `SIGINT` — same as SIGTERM. Allows clean shutdown from an interactive terminal.
-
-On exit, all lease socketpair fds held by the daemon are closed, which signals EOF to all connected clients.
-
-### System daemon (systemd, Linux — root)
-
-Suitable for shared GPU machines where multiple users need coordinated access. The daemon runs as a dedicated service account; a unix group controls who can reserve.
-
-**1. Install the package:**
-```bash
-pip install reserved
-```
-
-**2. Create the hardware config:**
-```bash
-sudo mkdir -p /etc/reserved
-sudo tee /etc/reserved/reserved.json > /dev/null <<'EOF'
-{
-  "devices": [
-    { "name": "cuda:0", "type": "cuda", "model": "rtx3090", "ram_mb": 24576, "compute_units": 100 }
-  ]
-}
-EOF
-```
-
-**3. Create the service account and group:**
-```bash
-sudo groupadd gpu-users
-sudo useradd --system --no-create-home --group reserved reserved
-```
-
-**4. Install unit files:**
-```bash
-sudo tee /etc/systemd/system/reserved.socket > /dev/null <<'EOF'
-[Unit]
-Description=reserved resource reservation daemon socket
-
-[Socket]
-ListenStream=/var/run/reserved.sock
-SocketGroup=gpu-users
-SocketMode=0660
-
-[Install]
-WantedBy=sockets.target
-EOF
-
-sudo tee /etc/systemd/system/reserved.service > /dev/null <<'EOF'
-[Unit]
-Description=reserved resource reservation daemon
-Requires=reserved.socket
-After=reserved.socket
-
-[Service]
-ExecStart=/usr/bin/reserved --config /etc/reserved/reserved.json
-User=reserved
-Group=reserved
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-EOF
-```
-
-**5. Enable and start:**
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now reserved.socket
-```
-
-**6. Add users who should be able to reserve:**
-```bash
-sudo usermod -aG gpu-users $USER
-```
-
-Users in `gpu-users` can now run `reserve` and use the SDK with no additional configuration. The socket is available immediately once the socket unit is active.
-
----
-
-### User daemon (systemd, Linux — no root)
-
-Suitable for a single-user workstation or a machine where root access is not available.
-
-**1. Install the package:**
-```bash
-pip install reserved
-```
-
-**2. Create the hardware config:**
-```bash
-mkdir -p ~/.config/reserved
-cat > ~/.config/reserved/reserved.json <<'EOF'
-{
-  "devices": [
-    { "name": "cuda:0", "type": "cuda", "model": "rtx3090", "ram_mb": 24576, "compute_units": 100 }
-  ]
-}
-EOF
-```
-
-**3. Install unit files:**
-```bash
-mkdir -p ~/.config/systemd/user
-
-cat > ~/.config/systemd/user/reserved.socket <<'EOF'
-[Unit]
-Description=reserved resource reservation daemon socket
-
-[Socket]
-ListenStream=%t/reserved.sock
-
-[Install]
-WantedBy=sockets.target
-EOF
-
-cat > ~/.config/systemd/user/reserved.service <<'EOF'
-[Unit]
-Description=reserved resource reservation daemon
-Requires=reserved.socket
-After=reserved.socket
-
-[Service]
-ExecStart=%h/.local/bin/reserved --config %h/.config/reserved/reserved.json
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-EOF
-```
-
-**4. Enable and start:**
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now reserved.socket
-```
-
-**5. Add to shell profile** so clients find the socket automatically:
-```bash
-echo 'export RESERVED_SOCKET="${XDG_RUNTIME_DIR}/reserved.sock"' >> ~/.bashrc
-```
-
-`%t` in the socket unit expands to `$XDG_RUNTIME_DIR` (e.g. `/var/run/user/1000`).
-
----
-
-### macOS (launchd)
-
-Suitable for Apple Silicon workstations.
-
-**1. Install the package:**
-```bash
-pip install reserved
-```
-
-**2. Create the hardware config:**
-```bash
-mkdir -p ~/.config/reserved
-cat > ~/.config/reserved/reserved.json <<'EOF'
-{
-  "devices": [
-    { "name": "metal:0", "type": "metal", "model": "m3-max", "ram_mb": 36864, "compute_units": 100 }
-  ]
-}
-EOF
-```
-
-**3. Install the launchd plist:**
-```bash
-cat > ~/Library/LaunchAgents/com.reserved.daemon.plist <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.reserved.daemon</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/reserved</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>/tmp/reserved.log</string>
-  <key>StandardErrorPath</key>
-  <string>/tmp/reserved.log</string>
-</dict>
-</plist>
-EOF
-```
-
-**4. Load the agent:**
-```bash
-launchctl load ~/Library/LaunchAgents/com.reserved.daemon.plist
-```
-
-**5. Add to shell profile:**
-```bash
-echo 'export RESERVED_SOCKET=/tmp/reserved.sock' >> ~/.zshrc
-```
-
-The daemon will use `~/.config/reserved/reserved.json` and bind to `/tmp/reserved.sock` via the fallback chain. On macOS, `$XDG_RUNTIME_DIR` is not set by default so `/tmp/reserved.sock` is used.
-
----
-
-### Standalone (no init system)
-
-Suitable for containers, CI, or quick local testing.
-
-```bash
-reserved --config /etc/reserved/reserved.json --socket /var/run/reserved.sock --socket-group gpu-users
-```
-
-The daemon runs in the foreground. Use a process supervisor (runit, s6, supervisord) for auto-restart.
+The daemon and clients share the socket discovery rules documented in
+[the installation guide](INSTALL.md#socket-and-config-discovery). A daemon
+started by systemd adopts its supplied listener. Explicit config selections
+must exist; an invalid explicit path does not fall back to another config.
 
 ---
 
