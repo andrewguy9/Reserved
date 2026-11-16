@@ -2,6 +2,8 @@
 Invariant-focused tests for the reserve CLI helpers.
 """
 
+import json
+
 import pytest
 
 from reserved.bin.reserve import build_exec_env, build_reserve_request, parse_slot
@@ -88,7 +90,7 @@ def test_build_reserve_request_requires_status_for_constraints():
 def test_build_exec_env_sets_reservation_metadata_without_mutating_base_env():
     base = {"KEEP": "yes"}
     granted_slots = [
-        {"device_name": "cpu", "cuda_ordinal": -1},
+        {"device_name": "cpu:batch,worker", "cuda_ordinal": -1},
         {"device_name": "cuda:2", "cuda_ordinal": 2},
         {"device_name": "cuda:2", "cuda_ordinal": 2},
         {"device_name": "metal:0", "cuda_ordinal": -1},
@@ -102,13 +104,14 @@ def test_build_exec_env_sets_reservation_metadata_without_mutating_base_env():
     assert env["RESERVED_ID"] == "abc123"
     assert env["RESERVED_FD"] == "9"
     assert env["RESERVED_DEVICE"] == "cuda:2"
-    assert env["RESERVED_DEVICES"] == "cpu,cuda:2,cuda:2,metal:0,cuda:3"
+    assert env["RESERVED_DEVICES"] == "cpu:batch,worker,cuda:2,cuda:2,metal:0,cuda:3"
     assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
+    assert json.loads(env["RESERVED_GRANTED_SLOTS"]) == granted_slots
 
 
 def test_build_exec_env_without_cuda_slots_does_not_add_cuda_visible_devices():
     env = build_exec_env(
-        {},
+        {"RESERVED_FD": "9"},
         [{"device_name": "metal:0", "cuda_ordinal": -1}],
         "rid",
         None,

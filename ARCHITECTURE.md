@@ -19,7 +19,7 @@
 
 ### Explicit language (daemon protocol)
 
-The daemon speaks only in explicit terms. Every slot names a specific device and states exactly how much capacity to claim:
+The daemon speaks only in explicit terms. Every slot names a physical device and states exactly how much capacity to claim:
 
 ```
 slot: name=cuda:0  ram_mb=8192  compute_units=50
@@ -77,7 +77,7 @@ Request
 
 Line-delimited JSON over a Unix domain socket. Each message is one JSON object terminated by `\n`.
 
-**Reserve request (explicit — all slots name specific devices):**
+**Reserve request with explicit physical device names**
 
 ```json
 {
@@ -115,7 +115,8 @@ Line-delimited JSON over a Unix domain socket. Each message is one JSON object t
 }
 ```
 
-`cuda_ordinal` is the physical CUDA ordinal from the device name (e.g. `cuda:2` → `2`). Used directly in `CUDA_VISIBLE_DEVICES` by the CLI. `-1` for non-CUDA devices.
+`device_name` identifies the physical grant. `cuda_ordinal` is its physical
+CUDA ordinal (for example, `2` for `cuda:2`) or `-1` for a non-CUDA grant.
 
 **Reserve response (failure):**
 
@@ -170,24 +171,40 @@ sets this up, sets environment variables, and replaces itself with CMD:
 reserve worker type=cuda,ram=8192 -- /path/to/model-env/bin/python worker.py
 ```
 
-CMD inherits the fd and holds the lease for its lifetime without knowing about
-Reserved. The SDK currently has no public API for transferring or adopting a
-lease. An SDK-aware worker can acquire its own reservation and call `check()`
-at checkpoints; the CLI wrapper alone does not stop a command on lease loss.
+CMD inherits the fd and holds the lease while the fd remains open. A Python
+worker can call `adopt_inherited_lease()` once to manage that same lease with
+the SDK. Adoption removes `RESERVED_FD` from the worker's environment and from
+the environment inherited by later children. The descriptor closes on a later
+`exec`, so an unrelated executable cannot extend the lease. A child that only
+forks still holds a descriptor copy. To hand off a lease across `exec`, do so
+before adopting it in the process that will manage its lifetime.
 See [Getting started](GETTING_STARTED.md#hold-capacity-for-a-model-worker).
 
 ---
 
 ## CUDA device indexing
 
-Two distinct concepts:
+Physical device names identify hardware in the config, CLI `name=` slots,
+solver, ledger, protocol, and SDK grant metadata. For example,
+`reserve infer name=cuda:2 -- python infer.py` claims physical `cuda:2`.
+The CLI exports that name in `RESERVED_DEVICE` and `RESERVED_DEVICES`, and
+passes the physical grant metadata in `RESERVED_GRANTED_SLOTS` for SDK
+adoption. `CUDA_VISIBLE_DEVICES=2` exposes the granted GPU to the worker.
+Multiple CUDA slots contribute distinct physical ordinals in first-grant order.
 
-- **Physical ordinal** — the integer in the device name (`cuda:2` → `2`). Goes into `CUDA_VISIBLE_DEVICES`.
-- **Logical index** — 0-based position within what `CUDA_VISIBLE_DEVICES` exposes. What `torch.device("cuda:N")` refers to inside the child process.
+`GrantedDevice.torch_device()` is the conversion boundary. It maps the
+physical ordinal to its zero-based position in the current process's CUDA
+mask. The worker above gets `torch.device("cuda:0")`. A process with
+`CUDA_VISIBLE_DEVICES=5,2` gets `torch.device("cuda:1")` for the same physical
+grant. `Reservation.torch_devices()` applies the conversion in grant order.
+Multiple slots on the same GPU resolve to the same logical index.
 
-The CLI sets `CUDA_VISIBLE_DEVICES` to physical ordinals (deduplicated for multi-slot same-device grants). The child process addresses devices as `cuda:0`, `cuda:1`, etc.
-
-The SDK does **not** set `CUDA_VISIBLE_DEVICES`. `torch_device()` returns the physical ordinal directly (e.g. `torch.device("cuda:2")`). Use the CLI if you need process-level GPU masking.
+An unset mask uses the physical ordinal as the logical index, assuming the
+unmasked CUDA order matches the configured physical ordinals. Configure
+visibility before CUDA initializes. The SDK checks that the mask is a list of
+distinct nonnegative decimal ordinals and that the grant appears in it. Empty
+and `-1` masks hide all CUDA devices. Hidden grants and unsupported masks
+raise `ReservationError`.
 
 ---
 

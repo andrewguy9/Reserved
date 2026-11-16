@@ -2,7 +2,8 @@
 protocol.py — Wire serialization for the reserved daemon protocol.
 
 Handles only explicit requests and responses. Constraint types (DeviceConstraint,
-ExplicitSlot from the SDK) never appear here.
+ExplicitSlot from the SDK) never appear here. Device names and CUDA ordinals
+on the wire identify physical devices.
 
 Wire format: single-line JSON terminated by '\\n' over a Unix domain socket.
 """
