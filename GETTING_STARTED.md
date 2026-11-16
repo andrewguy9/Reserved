@@ -153,8 +153,8 @@ those objects attempts a fresh acquisition.
 Use `recommend_workers()` when your application owns several model workers and
 wants help deciding how many to run. Each call supplies:
 
-- The shared queue count, per-worker resources, worker cap, and rough batch,
-  startup, and shutdown timings for each workload.
+- The shared queue count, per-worker resources, and worker cap for each workload.
+  Batch, startup, and shutdown estimates are optional.
 - The reservation ID, lifecycle state, and buffered request count for each
   existing worker, including workers still loading or draining.
 

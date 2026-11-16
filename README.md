@@ -13,12 +13,9 @@ installation from GitHub, a walkthrough requiring no GPU, and guidance
 on integrating an application or model worker.
 
 For applications that run multiple model workers, the SDK includes a
-[worker planner](#planning-a-pool-of-batched-workers). Describe your backlog,
-worker resource requirements, rough timings, and existing reservations to get
-recommendations for workers to keep, start, or gracefully drain. Try the
-[batched worker example](examples/README.md#batched-worker-planning) to see a
-complete application control loop using real reservations and CPU-only dummy
-services.
+[worker planner](#planning-a-pool-of-batched-workers). It fits workers to your
+backlog and available capacity. The [CPU example](examples/README.md#batched-worker-planning)
+shows how to start workers and drain them as the queue empties.
 
 For installation and service management, see [INSTALL.md](INSTALL.md). For the detailed design, see [ARCHITECTURE.md](ARCHITECTURE.md). The original proposal is in [RESERVED_DESIGN.md](RESERVED_DESIGN.md).
 
@@ -358,63 +355,39 @@ with Reservation("train", DeviceConstraint("cuda", ram_mb=16384)) as r:
 
 ### Planning a pool of batched workers
 
-`recommend_workers()` reads daemon status and recommends workers to keep, drain,
-or start from a shared queue and the reservations your application already owns.
-It uses rough batch, loading, and teardown estimates to size the accepting pool
-and phase out workers as the queue empties.
+Give `recommend_workers()` a count of unassigned requests, a per-worker
+constraint, and a worker cap. It uses the existing `SpreadSolver` policy to fit
+as many of those workers as the snapshot allows.
 
 ```python
-from reserved.sdk import (
-    Backlog, DeviceConstraint, OwnedWorker, Request, Reservation,
-    recommend_workers,
-)
+from reserved.sdk import Backlog, DeviceConstraint, Request, Reservation, recommend_workers
 
 backlog = Backlog(
     workload_id="model-a-fp16",
-    queued_requests=1000,  # Excludes requests already assigned to workers.
+    queued_requests=1000,
     worker=DeviceConstraint("cuda", ram_mb=8192, compute_units=50),
     max_workers=8,
-    batch_size=16,
-    batch_seconds=2,
-    startup_seconds=30,
-    shutdown_seconds=5,
 )
-
-# Pass every managed lease on subsequent calls, including loading and draining
-# workers. Buffered requests include both prefetched and executing batches.
-workers = []  # e.g. OwnedWorker(existing_id, "model-a-fp16", "accepting", 32)
-plan = recommend_workers([backlog], workers)
-
-if plan.expired:
-    # Reconcile affected workers before applying another plan.
-    raise RuntimeError(f"expired reservations: {plan.expired}")
-
-# Keep these lease objects alive and register them before launching workers.
+plan = recommend_workers([backlog])  # No workers held yet.
 leases = Request(*[
     Reservation(start.workload_id, start.slot) for start in plan.start
 ]).acquire()
 ```
 
-The application applies `plan.drain` by ceasing dispatch to those workers,
-allowing their buffered work and partial final batches to finish, then unloading
-and closing their leases. Already draining workers remain in `plan.keep`, which
-means continue their current state. Draining reservations stay occupied until
-the daemon observes their released leases; the planner does not reclaim them in
-advance. Loading workers are counted so polling does not duplicate them.
+Keep the acquired leases and report them on subsequent polls as `OwnedWorker`
+records, including loading and draining workers. Exclude buffered and in-flight
+work from `queued_requests`. Set `batch_size`, `batch_seconds`, `startup_seconds`,
+and `shutdown_seconds` to account for batching and startup costs.
 
-`plan.shortfall` maps workload IDs to `WorkerShortfall(count, reasons)`. Reasons
-are `capacity`, `startup_cost`, `starting`, or `worker_limit`; multiple constraints
-can apply. Covered targets are omitted. If acquisition loses a race, retain
-surviving workers and request a fresh recommendation. Use `plan_workers()` with
-a parsed status dictionary for planning without IO.
-Malformed workload or worker declarations raise `ValueError`.
+For `plan.drain`, stop assigning new work, finish each worker's buffer, unload,
+then release its lease. `plan.keep` means continue in the worker's current state.
+Reconcile `plan.expired` before applying changes, and replan if acquisition loses
+a race. `plan.shortfall` explains unmet targets. Use `plan_workers()` to plan
+against a parsed snapshot without IO.
 
-This is a conservative allocation heuristic using application-supplied timings.
-It assumes one slot per worker and the same service rate across a workload's
-compatible devices. Request ordering remains with the application. The
-[dummy worker example](examples/worker_planner.py) demonstrates a complete
-control loop, and [the project definition](WORKER_PLANNER_PLAN.md) describes the
-algorithm and lifecycle contract.
+The [runnable example](examples/README.md#batched-worker-planning) shows the full
+control loop. See the [planner reference](WORKER_PLANNER_PLAN.md) for sizing and
+lifecycle details.
 
 ### Errors
 

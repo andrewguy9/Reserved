@@ -14,7 +14,7 @@ from typing import Any, Literal, Mapping, Sequence
 
 from . import client
 from .client import DeviceConstraint, ExplicitSlot
-from .solvers import SpreadSolver
+from .solvers import SpreadSolver, _matches
 
 
 WorkerState = Literal["starting", "accepting", "draining", "stopping"]
@@ -27,17 +27,18 @@ class Backlog:
 
     queued_requests excludes work already buffered or executing on workers.
     batch_seconds includes normal batch processing; startup/shutdown describe
-    loading and teardown. All compatible devices use these same estimates.
+    loading and teardown. With the default timings, size by queue length,
+    the worker cap, and available capacity.
     """
 
     workload_id: str
     queued_requests: int
     worker: DeviceConstraint
     max_workers: int
-    batch_size: int
-    batch_seconds: float
-    startup_seconds: float
-    shutdown_seconds: float
+    batch_size: int = 1
+    batch_seconds: float = 1.0
+    startup_seconds: float = 0.0
+    shutdown_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -92,10 +93,8 @@ class _Placement:
     backlog: Backlog
     target: int
     covered: int
-    budget: int
-    reasons: set[ShortfallReason] = field(default_factory=set)
-    added: int = 0
-    blocked: bool = False
+    starts_left: int
+    reasons: set[ShortfallReason]
 
 
 def _count(name: str, value: int, minimum: int = 0) -> None:
@@ -187,13 +186,8 @@ def _validate_claim(
         raise ValueError(f"worker {worker.reservation_id!r} must have exactly one slot")
     slot = slots[0]
     device = devices.get(slot["device_name"])
-    requirement = backlog.worker
-    if (
-        device is None
-        or device["type"] != requirement.type
-        or (requirement.model is not None and device.get("model") != requirement.model)
-        or slot["ram_mb"] < requirement.ram_mb
-        or slot["compute_units"] < requirement.compute_units
+    if device is None or not _matches(
+        device, backlog.worker, slot["ram_mb"], slot["compute_units"]
     ):
         raise ValueError(
             f"reservation {worker.reservation_id!r} does not cover its workload's requirement"
@@ -217,7 +211,7 @@ def plan_workers(
     backlogs, workers = tuple(backlogs), tuple(workers)
     _validate_inputs(backlogs, workers)
     by_id = {backlog.workload_id: backlog for backlog in backlogs}
-    devices = {device["name"]: dict(device) for device in status["devices"]}
+    devices = {device["name"]: device for device in status["devices"]}
     reservations = {reservation["id"]: reservation for reservation in status["reservations"]}
     if len(devices) != len(status["devices"]) or len(reservations) != len(status["reservations"]):
         raise ValueError("status contains duplicate device or reservation IDs")
@@ -274,36 +268,32 @@ def plan_workers(
             backlog, target, covered, min(needed, cap_space, affordable), reasons
         ))
 
-    available = [devices[name] for name in sorted(devices)]
-    solver = SpreadSolver()
+    pool = SpreadSolver()._pool(devices[name] for name in sorted(devices))
     starts: list[WorkerStart] = []
     while True:
         candidates = sorted(
-            (item for item in placements if not item.blocked and item.added < item.budget),
-            key=lambda item: (item.covered + item.added, item.backlog.workload_id),
+            (item for item in placements if item.starts_left),
+            key=lambda item: (item.covered, item.backlog.workload_id),
         )
         if not candidates:
             break
         for item in candidates:
             backlog = item.backlog
-            try:
-                request = solver.solve([(backlog.workload_id, [backlog.worker])], available)
-            except ValueError:
-                item.blocked = True
+            slot = pool.place(backlog.worker)
+            if slot is None:
+                item.starts_left = 0  # capacity can only decrease during this plan
                 item.reasons.add("capacity")
                 continue
-            slot = request.reservations[0].slots[0]
             starts.append(WorkerStart(backlog.workload_id, ExplicitSlot(
                 slot.name, ram_mb=slot.ram_mb, compute_units=slot.compute_units
             )))
-            devices[slot.name]["available_ram_mb"] -= slot.ram_mb
-            devices[slot.name]["available_compute_units"] -= slot.compute_units
-            item.added += 1
+            item.starts_left -= 1
+            item.covered += 1
 
     shortfall = {}
     for item in placements:
-        count = max(0, item.target - item.covered - item.added)
-        if count:
+        count = item.target - item.covered
+        if count > 0:
             shortfall[item.backlog.workload_id] = WorkerShortfall(
                 count, tuple(sorted(item.reasons))
             )
@@ -318,7 +308,7 @@ def plan_workers(
 
 def recommend_workers(
     backlogs: Sequence[Backlog],
-    workers: Sequence[OwnedWorker],
+    workers: Sequence[OwnedWorker] = (),
     *,
     socket_path: str | None = None,
 ) -> WorkerPlan:

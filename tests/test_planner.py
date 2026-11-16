@@ -50,7 +50,7 @@ def hold(ledger, name="cuda:0", *, workload_id="a", state="accepting",
 def test_large_queue_uses_both_devices_without_mutating_inputs():
     status = snapshot(make_ledger())
     original = deepcopy(status)
-    demand = backlog()
+    demand = Backlog("a", 10000, DeviceConstraint("cuda", ram_mb=8192, compute_units=50), 8)
     requirement = deepcopy(demand.worker)
 
     plan = plan_workers([demand], [], status)

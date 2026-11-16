@@ -60,7 +60,7 @@ leases independently. Timing runs at 50 times the declared speed.
 
 The planner only recommends changes. The example application owns worker
 startup, dispatch, lifecycle state, and lease cleanup. See
-[the project definition](../WORKER_PLANNER_PLAN.md) for the sizing heuristic.
+[the planner reference](../WORKER_PLANNER_PLAN.md) for the sizing heuristic.
 The [SDK guide](../README.md#planning-a-pool-of-batched-workers) explains the
 input and output types and how to acquire recommended reservations.
 
