@@ -1,0 +1,12 @@
+[Unit]
+Description=ReserveD resource reservation daemon
+Requires=reserved.socket
+After=reserved.socket
+
+[Service]
+Type=simple
+ExecStart=/opt/reserved/venv/bin/python -m reserved.daemon --config /etc/reserved/reserved.json
+User=reserved
+Group=reserved
+Restart=on-failure
+RestartSec=2

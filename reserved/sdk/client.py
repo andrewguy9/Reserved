@@ -21,24 +21,24 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-from ..core import (
+from reserved import protocol
+from reserved.core import (
     ReservationRequest,
     ReserveRequest,
     SlotRequest,
 )
-from .. import protocol
-from .errors import (
+from reserved.paths import resolve_socket_path as _get_socket_path
+from reserved.sdk.errors import (
     DaemonNotRunningError,
     InheritedLeaseAlreadyAdoptedError,
     ReservationError,
     ReservationExpiredError,
 )
-from .solvers import ConsolidateSolver
+from reserved.sdk.solvers import ConsolidateSolver
 
 # Type alias used by solvers.
 ReservationSpec = tuple[str, list]  # (label, list[DeviceConstraint | ExplicitSlot])
 
-_DEFAULT_SOCKET = "/var/run/reserved.sock"
 _inherited_lease_lock = threading.Lock()
 _inherited_lease_adopted = False
 
@@ -50,14 +50,6 @@ def _reset_inherited_lease_lock() -> None:
 
 
 os.register_at_fork(after_in_child=_reset_inherited_lease_lock)
-
-
-def _get_socket_path(override: str | None = None) -> str:
-    if override:
-        return override
-    return os.environ.get("RESERVED_SOCKET", _DEFAULT_SOCKET)
-
-
 
 
 # ---------------------------------------------------------------------------

@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
-"""
-reserve-status — Print the current state of all devices and active reservations.
-
-Usage:
-    reserve-status [--socket PATH] [--json]
-"""
+"""Print the current state of all devices and active reservations."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -19,8 +13,23 @@ _here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _here not in sys.path:
     sys.path.insert(0, _here)
 
+from reserved.cli import parse_options
+from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import _get_socket_path, _query_status
 from reserved.sdk.errors import DaemonNotRunningError
+
+
+_USAGE = f"""Print current device and reservation status.
+
+Usage:
+    reserve-status [--socket PATH] [--json]
+    reserve-status (-h | --help)
+
+Options:
+    -h --help      Show this help.
+    --socket PATH  {SOCKET_PATH_HELP}
+    --json         Output raw JSON.
+"""
 
 
 def _format_human(status: dict) -> str:
@@ -51,25 +60,9 @@ def _format_human(status: dict) -> str:
     return "\n".join(lines)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="reserve-status",
-        description="Print current device and reservation status.",
-    )
-    parser.add_argument(
-        "--socket",
-        default=None,
-        help="Daemon socket path [default: $RESERVED_SOCKET or /var/run/reserved.sock]",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        dest="as_json",
-        help="Output raw JSON",
-    )
-    args = parser.parse_args()
-
-    socket_path = _get_socket_path(args.socket)
+def main(argv: list[str] | None = None) -> None:
+    args = parse_options(_USAGE, argv)
+    socket_path = _get_socket_path(args["--socket"])
 
     try:
         status = _query_status(socket_path)
@@ -77,7 +70,7 @@ def main() -> None:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(2)
 
-    if args.as_json:
+    if args["--json"]:
         print(json.dumps(status, indent=2))
     else:
         print(_format_human(status))

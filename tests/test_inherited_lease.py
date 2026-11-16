@@ -193,6 +193,20 @@ def test_adopts_and_releases_real_launcher_lease(daemon_env, mode):
     assert result.returncode == 0, result.stderr
 
 
+def test_launcher_passes_worker_options_and_separator_through(daemon_env):
+    socket_path = daemon_env["RESERVED_SOCKET"]
+    worker_args = ["--help", "--socket=worker.sock", "--", "", "two words"]
+    result = subprocess.run(
+        [sys.executable, "-m", "reserved.bin.reserve", "worker", "type=cuda,ram=768",
+         "type=cuda,ram=768", "--solver=spread", "--socket", socket_path,
+         "--", sys.executable, "-c", "import json, sys; print(json.dumps(sys.argv[1:]))",
+         *worker_args],
+        env={**daemon_env, "RESERVED_SOCKET": f"{socket_path}.unused"},
+        check=True, capture_output=True, text=True, timeout=10,
+    )
+    assert json.loads(result.stdout) == worker_args
+
+
 def test_sdk_keeps_physical_grant_order_with_reordered_cuda_visibility(daemon_env, monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "5,2")
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=str))
