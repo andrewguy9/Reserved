@@ -183,12 +183,15 @@ reserve infer type=cuda,model=rtx3090 -- python infer.py
 # Pin to a physical device
 reserve infer name=cuda:2 -- python infer.py
 
-# Two CUDA devices (distributed job)
-reserve distributed type=cuda type=cuda -- python distributed.py
+# Two distinct CUDA devices (distributed job)
+reserve distributed name=cuda:0,ram=1024 name=cuda:1,ram=1024 -- python distributed.py
 
-# Spread across cards for throughput
-reserve pipeline --solver spread type=cuda type=cuda -- python pipeline.py
+# Prefer spreading across cards when capacity allows
+reserve pipeline type=cuda type=cuda --solver spread -- python pipeline.py
 ```
+
+See the [runnable NVIDIA CUDA examples](examples/README.md#nvidia-cuda) for
+configs and a PyTorch worker for one or two cards.
 
 **Environment variables set before exec:**
 
@@ -234,8 +237,9 @@ with Reservation("infer", DeviceConstraint("cuda", ram_mb=30720)) as r:
     model.to(r.devices[0].torch_device())
     ...
 
-# Two CUDA devices, released together
-with Reservation("distributed", DeviceConstraint("cuda"), DeviceConstraint("cuda")) as r:
+# Two distinct CUDA devices, released together
+with Reservation("distributed", ExplicitSlot("cuda:0", ram_mb=1024),
+                 ExplicitSlot("cuda:1", ram_mb=1024)) as r:
     devices = r.torch_devices()
     run_distributed(devices)
 ```
