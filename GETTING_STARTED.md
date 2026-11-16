@@ -10,8 +10,8 @@ batching, retries, model loading, and worker processes.
 ## Install from GitHub
 
 Requires Python 3.11 or later and Git on macOS or Linux. The transport uses Unix
-sockets and file descriptor passing. The package has no runtime dependencies;
-PyTorch is imported only if you call `torch_device()` or `torch_devices()`.
+sockets and file descriptor passing. Pip installs `docopt-ng` for the command-line
+tools. Install PyTorch separately when using `torch_device()` or `torch_devices()`.
 
 Activate your application's existing Python environment. For a standalone demo,
 you can create one instead:

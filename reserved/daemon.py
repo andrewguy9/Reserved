@@ -26,10 +26,10 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
-from . import core, protocol
-from .core import Ledger
-from .paths import SOCKET_PATH_HELP, resolve_socket_path as _resolve_socket
-from .daemon_state import (
+from reserved import core, protocol
+from reserved.cli import parse_options, usage_error
+from reserved.core import Ledger
+from reserved.daemon_state import (
     Accepted,
     CloseLease,
     CloseTransport,
@@ -44,6 +44,23 @@ from .daemon_state import (
     initial_state,
     step,
 )
+from reserved.paths import SOCKET_PATH_HELP, resolve_socket_path as _resolve_socket
+
+
+_USAGE = f"""Resource reservation daemon.
+
+Usage:
+    reserved [options]
+
+Options:
+    -h --help             Show this help.
+    --config PATH         Hardware config. Defaults to RESERVED_CONFIG, then
+                          ~/.config/reserved/reserved.json and /etc/reserved/reserved.json.
+    --socket PATH         {SOCKET_PATH_HELP}
+    --socket-group GROUP  Set the socket file group.
+    --http PORT           Start the HTTP monitoring server on PORT.
+    --log-level LEVEL     DEBUG, INFO, WARNING, or ERROR [default: INFO].
+"""
 
 logger = logging.getLogger("reserved")
 
@@ -521,57 +538,45 @@ def _acquire_socket_systemd() -> socket.socket | None:
 
 def _resolve_config(flag: str | None) -> str:
     """Return the config file path using the documented fallback chain."""
-    explicit = flag or os.environ.get("RESERVED_CONFIG")
-    if explicit:
-        if os.path.isfile(explicit):
-            return explicit
-        print(f"error: config file not found: {explicit}", file=sys.stderr)
-        sys.exit(1)
-    candidates = [
+    defaults = (
         os.path.expanduser("~/.config/reserved/reserved.json"),
         "/etc/reserved/reserved.json",
-    ]
-    for path in candidates:
-        if path and os.path.isfile(path):
-            return path
-    searched = [c for c in candidates if c]
-    print(
-        f"error: no config file found. Searched: {', '.join(searched)}\n"
-        "Pass --config PATH or set RESERVED_CONFIG.",
-        file=sys.stderr,
     )
-    sys.exit(1)
-
-
-def main() -> None:
-    import argparse
-    import json as _json
-
-    parser = argparse.ArgumentParser(
-        prog="reserved",
-        description="Resource reservation daemon",
+    path = flag or os.environ.get("RESERVED_CONFIG") or next(
+        (candidate for candidate in defaults if os.path.isfile(candidate)), None
     )
-    parser.add_argument("--config", default=None, help=(
-        "Path to reserved.json config file. "
-        "Falls back to RESERVED_CONFIG env var, "
-        "~/.config/reserved/reserved.json, /etc/reserved/reserved.json."
-    ))
-    parser.add_argument("--socket", default=None, help=SOCKET_PATH_HELP)
-    parser.add_argument("--socket-group", default=None, help="Set socket file group")
-    parser.add_argument("--http", type=int, default=None, metavar="PORT",
-                        help="Start HTTP monitoring server on PORT")
-    parser.add_argument("--log-level", default="INFO",
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"])
-    args = parser.parse_args()
+    if path is None:
+        print(
+            f"error: no config file found. Searched: {', '.join(defaults)}\n"
+            "Pass --config PATH or set RESERVED_CONFIG.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not os.path.isfile(path):
+        print(f"error: config file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+    return path
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_options(_USAGE, argv)
+    log_level = args["--log-level"]
+    if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
+        usage_error("--log-level must be DEBUG, INFO, WARNING, or ERROR")
+    port = args["--http"]
+    try:
+        http_port = int(port) if port is not None else None
+    except ValueError:
+        usage_error("--http requires an integer port")
 
     logging.basicConfig(
-        level=getattr(logging, args.log_level),
+        level=log_level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    config_path = _resolve_config(args.config)
+    config_path = _resolve_config(args["--config"])
     with open(config_path) as f:
-        config = _json.load(f)
+        config = json.load(f)
 
     ledger = core.load_ledger(config)
     logger.info("loaded %d device(s) from %s", len(ledger.availability), config_path)
@@ -580,15 +585,16 @@ def main() -> None:
     try:
         listen_sock = _acquire_socket_systemd()
         if listen_sock is None:
-            socket_path = _resolve_socket(args.socket)
-            listen_sock = _acquire_socket(socket_path, args.socket_group)
+            socket_path = _resolve_socket(args["--socket"])
+            listen_sock = _acquire_socket(socket_path, args["--socket-group"])
             logger.info("bound socket at %s", socket_path)
         else:
             logger.info("using systemd socket activation")
     except (OSError, ValueError) as exc:
-        parser.exit(1, f"error: could not acquire listening socket: {exc}\n")
+        print(f"error: could not acquire listening socket: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
 
-    daemon = Daemon(ledger, listen_sock, http_port=args.http)
+    daemon = Daemon(ledger, listen_sock, http_port=http_port)
     daemon.run()
 
 

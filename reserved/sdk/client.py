@@ -21,20 +21,20 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-from ..core import (
+from reserved import protocol
+from reserved.core import (
     ReservationRequest,
     ReserveRequest,
     SlotRequest,
 )
-from .. import protocol
-from ..paths import resolve_socket_path as _get_socket_path
-from .errors import (
+from reserved.paths import resolve_socket_path as _get_socket_path
+from reserved.sdk.errors import (
     DaemonNotRunningError,
     InheritedLeaseAlreadyAdoptedError,
     ReservationError,
     ReservationExpiredError,
 )
-from .solvers import ConsolidateSolver
+from reserved.sdk.solvers import ConsolidateSolver
 
 # Type alias used by solvers.
 ReservationSpec = tuple[str, list]  # (label, list[DeviceConstraint | ExplicitSlot])

@@ -33,6 +33,24 @@ def test_config_flag_overrides_environment(monkeypatch, tmp_path):
     assert daemon._resolve_config(str(config)) == str(config)
 
 
+def test_config_without_override_uses_home_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("RESERVED_CONFIG", raising=False)
+    config = tmp_path / ".config" / "reserved" / "reserved.json"
+    config.parent.mkdir(parents=True)
+    config.write_text('{"devices": []}')
+
+    assert daemon._resolve_config(None) == str(config)
+
+
+@pytest.mark.parametrize("option", ["--http", "--log-level"])
+def test_daemon_rejects_invalid_option_value(option, capsys):
+    with pytest.raises(SystemExit) as exc:
+        daemon.main([option, "invalid"])
+    assert exc.value.code == 2
+    assert option in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("pid,count", [(None, None), ("other", "1"), (str(os.getpid()), "0")])
 def test_activation_ignores_absent_or_unaddressed_descriptors(monkeypatch, pid, count):
     for name, value in [("LISTEN_PID", pid), ("LISTEN_FDS", count)]:

@@ -1,28 +1,8 @@
 #!/usr/bin/env python3
-"""
-reserve — Acquire a reservation and exec a command under it.
-
-Usage:
-    reserve LABEL [SLOT ...] [--solver consolidate|spread] [--socket PATH] -- CMD [ARGS...]
-
-SLOT format: comma-separated key=value pairs.
-    type=TYPE        Device type (cuda, metal, cpu)
-    model=MODEL      Device model label
-    ram=MB           RAM in MB (alias for ram_mb)
-    ram_mb=MB        RAM in MB
-    compute=N        Compute units (alias for compute_units)
-    compute_units=N  Compute units
-    name=NAME        Pin to a physical device (bypasses solver)
-
-Examples:
-    reserve train type=cuda,ram=8192 -- python train.py
-    reserve infer name=cuda:2 -- python infer.py
-    reserve distributed type=cuda type=cuda --solver spread -- python dist.py
-"""
+"""Acquire a reservation and exec a command under it."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -32,6 +12,9 @@ _here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _here not in sys.path:
     sys.path.insert(0, _here)
 
+from reserved.cli import parse_options, usage_error
+from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
+from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import (
     DeviceConstraint,
     ExplicitSlot,
@@ -40,9 +23,34 @@ from reserved.sdk.client import (
     _send_reserve,
 )
 from reserved.sdk.errors import DaemonNotRunningError
-from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.solvers import ConsolidateSolver, SpreadSolver
-from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
+
+
+_USAGE = f"""Acquire a reservation and exec a command under it.
+
+Usage:
+    reserve [options] LABEL [SLOT...]
+    reserve (-h | --help)
+
+Append -- CMD [ARGS...] after the options, label, and slots.
+
+Options:
+    -h --help        Show this help.
+    --solver SOLVER  Select consolidate or spread [default: consolidate].
+    --socket PATH    {SOCKET_PATH_HELP}
+
+SLOT format: comma-separated key=value pairs.
+    type=TYPE        Device type (cuda, metal, cpu)
+    model=MODEL      Device model label
+    ram=MB           RAM in MB (alias for ram_mb)
+    compute=N        Compute units (alias for compute_units)
+    name=NAME        Pin to a physical device (bypasses solver)
+
+Examples:
+    reserve train type=cuda,ram=8192 -- python train.py
+    reserve infer name=cuda:2 -- python infer.py
+    reserve distributed name=cuda:0 name=cuda:1 -- python dist.py
+"""
 
 
 def parse_slot(spec: str) -> DeviceConstraint | ExplicitSlot:
@@ -135,55 +143,29 @@ def build_exec_env(
     return env
 
 
-def main() -> None:
-    # Split argv at '--' to separate reserve args from CMD.
-    argv = sys.argv[1:]
-    try:
+def main(argv: list[str] | None = None) -> None:
+    # Parse only reserve's arguments so the worker gets its exact argument vector.
+    argv = sys.argv[1:] if argv is None else argv
+    if "--" in argv:
         sep = argv.index("--")
         reserve_args = argv[:sep]
         cmd_args = argv[sep + 1 :]
-    except ValueError:
+    else:
         reserve_args = argv
         cmd_args = []
 
-    parser = argparse.ArgumentParser(
-        prog="reserve",
-        description="Acquire a reservation and exec a command under it.",
-        add_help=True,
-    )
-    parser.add_argument("label", help="Reservation label")
-    parser.add_argument(
-        "slots",
-        nargs="*",
-        metavar="SLOT",
-        help="Device constraints (type=TYPE,ram=MB,...) or physical device (name=NAME)",
-    )
-    parser.add_argument(
-        "--solver",
-        choices=["consolidate", "spread"],
-        default="consolidate",
-        help="Constraint solver [default: consolidate]",
-    )
-    parser.add_argument(
-        "--socket",
-        default=None,
-        help=SOCKET_PATH_HELP,
-    )
-
-    args = parser.parse_args(reserve_args)
-
+    args = parse_options(_USAGE, reserve_args)
     if not cmd_args:
-        parser.error("no command specified after '--'")
+        usage_error("no command specified after '--'")
+    solver_name = args["--solver"]
+    if solver_name not in {"consolidate", "spread"}:
+        usage_error("--solver must be consolidate or spread")
 
-    socket_path = _get_socket_path(args.socket)
-    solver = SpreadSolver() if args.solver == "spread" else ConsolidateSolver()
+    socket_path = _get_socket_path(args["--socket"])
+    solver = SpreadSolver() if solver_name == "spread" else ConsolidateSolver()
 
-    # Parse slot descriptors.
-    slots: list[DeviceConstraint | ExplicitSlot] = []
-    for spec in args.slots:
-        slots.append(parse_slot(spec))
-
-    label = args.label
+    slots = [parse_slot(spec) for spec in args["SLOT"]]
+    label = args["LABEL"]
 
     if all(isinstance(s, ExplicitSlot) for s in slots) or not slots:
         req = build_reserve_request(label, slots, solver)

@@ -42,10 +42,10 @@ by name from the public index. The commands below use a
 [virtual environment](https://docs.python.org/3/library/venv.html), so they work
 with externally managed system Python installations without overriding them.
 
-ReserveD has no runtime Python dependencies. CUDA, Metal, and PyTorch are not
-required to run the daemon or verify installation. Workloads install their own
-frameworks and drivers. Hardware is configured manually; ReserveD does not
-discover devices or measure free hardware memory.
+Pip installs `docopt-ng` for the command-line tools. You can run the daemon and
+verify installation with the CPU example. Install any GPU drivers and frameworks
+required by your workload separately. ReserveD accounts for the devices and
+budgets you declare in the configuration file.
 
 ## Linux system service
 
@@ -148,6 +148,14 @@ cp deploy/systemd/user/reserved.socket deploy/systemd/user/reserved.service "$HO
 systemctl --user daemon-reload
 systemctl --user enable --now reserved.socket
 ```
+
+In the service's `ExecStart`, systemd expands `%h` to the home directory of the
+user running the service manager. The command runs `reserved.daemon` with the
+virtual environment's Python and passes the config file created in step 1.
+The absolute interpreter path allows systemd to start the daemon without shell
+activation. If you install to different locations, update the interpreter and
+config paths in the unit and run `systemctl --user daemon-reload`.
+See [systemd's unit specifiers](https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html#Specifiers).
 
 The socket unit uses `%t/reserved.sock`, where `%t` is your systemd runtime
 directory (`$XDG_RUNTIME_DIR`, usually `/run/user/<uid>`). Its mode is `0600`.

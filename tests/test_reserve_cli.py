@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from reserved.bin.reserve import build_exec_env, build_reserve_request, parse_slot
+from reserved.bin.reserve import build_exec_env, build_reserve_request, main, parse_slot
 from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
 from reserved.sdk.client import DeviceConstraint, ExplicitSlot
 from reserved.sdk.solvers import ConsolidateSolver
@@ -33,6 +33,17 @@ def test_parse_slot_name_selects_explicit_slot():
 def test_parse_slot_rejects_fields_without_key_value_shape():
     with pytest.raises(SystemExit):
         parse_slot("type=cuda,ram")
+
+
+@pytest.mark.parametrize("argv, message", [
+    (["job", "--"], "no command specified"),
+    (["job", "--solver=invalid", "--", "true"], "--solver must be"),
+])
+def test_main_rejects_invalid_invocations(argv, message, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err
 
 
 def test_build_reserve_request_for_explicit_slots_preserves_order_and_capacity():

@@ -76,8 +76,12 @@ def test_format_human_reports_empty_reservations():
 
 
 def test_main_json_outputs_machine_readable_status(monkeypatch, capsys):
+    def query(socket_path):
+        assert socket_path == "/tmp/sock"
+        return STATUS
+
     monkeypatch.setattr(sys, "argv", ["reserve-status", "--socket", "/tmp/sock", "--json"])
-    monkeypatch.setattr(reserve_status, "_query_status", lambda socket_path: STATUS)
+    monkeypatch.setattr(reserve_status, "_query_status", query)
 
     reserve_status.main()
 
