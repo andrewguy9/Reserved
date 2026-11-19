@@ -39,8 +39,9 @@ slot: type=cuda  model=rtx3090
 A **constraint solver** is a pure computation: `solve(capacity, requirements)`
 returns one tuple of explicit `SlotRequest` assignments per input slot group.
 It reads no daemon state and attaches no labels. The SDK/CLI shell adds labels
-and constructs the explicit daemon request. `acquire_solution(solution,
-labels=...)` acquires an already computed solution through `Request.acquire()`.
+and constructs the explicit daemon request. `acquire_reservations(slot_groups,
+labels=...)` acquires one reservation per selected slot group through
+`Request.acquire()`.
 
 ### Constraint solvers
 
@@ -52,7 +53,7 @@ labels=...)` acquires an already computed solution through `Request.acquire()`.
 Any caller can bypass solvers by submitting an explicit request directly to the daemon — this is what sophisticated orchestrators do after running their own placement algorithm.
 
 ```
-Capacity + requirements → Solver → Solution → SDK/CLI labels request → Daemon
+Capacity + requirements → Solver → Selected slots → SDK/CLI labels request → Daemon
 Orchestrator-provided explicit slots ────────→ SDK/CLI labels request → Daemon
 ```
 

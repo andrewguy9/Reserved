@@ -180,14 +180,14 @@ class TestSpreadSolver:
 
 
 @pytest.mark.parametrize("solver", [ConsolidateSolver(), SpreadSolver()])
-def test_solution_is_repeatable_and_preserves_inputs_on_success_and_failure(solver):
+def test_selected_slots_are_repeatable_and_preserve_inputs_on_success_and_failure(solver):
     capacity = deepcopy(DEVICES)
     worker = [DeviceConstraint("cpu", ram_mb=1024)]
     requirements = [worker, worker, []]
     original = deepcopy((capacity, requirements))
-    solution = solver.solve(capacity, requirements)
-    assert solution == ((SlotRequest("cpu", 1024, 0),), (SlotRequest("cpu", 1024, 0),), ())
-    assert solver.solve(capacity, requirements) == solution
+    slot_groups = solver.solve(capacity, requirements)
+    assert slot_groups == ((SlotRequest("cpu", 1024, 0),), (SlotRequest("cpu", 1024, 0),), ())
+    assert solver.solve(capacity, requirements) == slot_groups
     assert (capacity, requirements) == original
     requirements.append([DeviceConstraint("cuda", ram_mb=1000000)])
     failed_inputs = deepcopy((capacity, requirements))

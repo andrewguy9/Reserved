@@ -20,9 +20,6 @@ if TYPE_CHECKING:
 from ..core import SlotRequest
 
 
-Solution = tuple[tuple[SlotRequest, ...], ...]
-
-
 # ---------------------------------------------------------------------------
 # Type alias for a parsed status response (dict from JSON)
 # ---------------------------------------------------------------------------
@@ -57,7 +54,7 @@ class ConsolidateSolver:
         self,
         capacity: list[DeviceStatusDict],
         requirements: Sequence[Sequence[DeviceConstraint | ExplicitSlot]],
-    ) -> Solution:
+    ) -> tuple[tuple[SlotRequest, ...], ...]:
         """
         Return one tuple of assigned slots per requirement group, without IO
         or changing either input. Raise ValueError when placement fails.
@@ -67,7 +64,7 @@ class ConsolidateSolver:
         # Work with a mutable copy of available capacities for simulation.
         avail: dict[str, dict] = {d["name"]: dict(d) for d in capacity}
 
-        solution: list[tuple[SlotRequest, ...]] = []
+        slot_groups: list[tuple[SlotRequest, ...]] = []
 
         for slots in requirements:
             slot_requests: list[SlotRequest] = []
@@ -103,9 +100,9 @@ class ConsolidateSolver:
                     avail[best["name"]]["available_ram_mb"] -= slot.ram_mb
                     avail[best["name"]]["available_compute_units"] -= slot.compute_units
 
-            solution.append(tuple(slot_requests))
+            slot_groups.append(tuple(slot_requests))
 
-        return tuple(solution)
+        return tuple(slot_groups)
 
 
 class SpreadSolver:
@@ -120,12 +117,12 @@ class SpreadSolver:
         self,
         capacity: list[DeviceStatusDict],
         requirements: Sequence[Sequence[DeviceConstraint | ExplicitSlot]],
-    ) -> Solution:
+    ) -> tuple[tuple[SlotRequest, ...], ...]:
         from .client import DeviceConstraint, ExplicitSlot
 
         avail: dict[str, dict] = {d["name"]: dict(d) for d in capacity}
 
-        solution: list[tuple[SlotRequest, ...]] = []
+        slot_groups: list[tuple[SlotRequest, ...]] = []
 
         for slots in requirements:
             slot_requests: list[SlotRequest] = []
@@ -158,6 +155,6 @@ class SpreadSolver:
                     avail[best["name"]]["available_ram_mb"] -= slot.ram_mb
                     avail[best["name"]]["available_compute_units"] -= slot.compute_units
 
-            solution.append(tuple(slot_requests))
+            slot_groups.append(tuple(slot_requests))
 
-        return tuple(solution)
+        return tuple(slot_groups)

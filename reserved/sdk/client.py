@@ -5,7 +5,7 @@ Public API:
   Reservation(label, *slots, solver=ConsolidateSolver(), socket_path=None)
   adopt_inherited_lease()
   Request(*reservations, socket_path=None)
-  acquire_solution(solution, *, labels, socket_path=None)
+  acquire_reservations(slot_groups, *, labels, socket_path=None)
   DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)
   ExplicitSlot(name, *, ram_mb=0, compute_units=0)
   GrantedDevice(device_name, cuda_ordinal)
@@ -35,7 +35,7 @@ from reserved.sdk.errors import (
     ReservationError,
     ReservationExpiredError,
 )
-from reserved.sdk.solvers import ConsolidateSolver, Solution
+from reserved.sdk.solvers import ConsolidateSolver
 
 _inherited_lease_lock = threading.Lock()
 _inherited_lease_adopted = False
@@ -328,11 +328,11 @@ class Reservation:
         else:
             status = _query_status(socket_path)
             try:
-                solution = self._solver.solve(status["devices"], [self._slots])
+                slot_groups = self._solver.solve(status["devices"], [self._slots])
             except ValueError as exc:
                 raise ReservationError(str(exc)) from exc
             req = ReserveRequest(reservations=(
-                ReservationRequest(label=self.label, slots=solution[0]),
+                ReservationRequest(label=self.label, slots=slot_groups[0]),
             ))
 
         resp, fds = _send_reserve(socket_path, req, num_reservations=1)
@@ -550,10 +550,10 @@ class Request:
             req = self._build_explicit_request()
         else:
             status = _query_status(socket_path)
-            solution = self._solve(status["devices"])
+            slot_groups = self._solve(status["devices"])
             req = ReserveRequest(reservations=tuple(
                 ReservationRequest(label=r.label, slots=slots)
-                for r, slots in zip(self._reservations, solution, strict=True)
+                for r, slots in zip(self._reservations, slot_groups, strict=True)
             ))
 
         num = len(self._reservations)
@@ -595,7 +595,7 @@ class Request:
             res_reqs.append(ReservationRequest(label=r.label, slots=tuple(slots)))
         return ReserveRequest(reservations=tuple(res_reqs))
 
-    def _solve(self, devices: list[dict]) -> Solution:
+    def _solve(self, devices: list[dict]) -> tuple[tuple[SlotRequest, ...], ...]:
         # All reservations share the same solver (from the first one, or default).
         solver = self._reservations[0]._solver if self._reservations else ConsolidateSolver()
         try:
@@ -604,21 +604,22 @@ class Request:
             raise ReservationError(str(exc)) from exc
 
 
-def acquire_solution(
-    solution: Solution,
+def acquire_reservations(
+    slot_groups: Sequence[Sequence[SlotRequest]],
     *,
     labels: Sequence[str],
     socket_path: str | None = None,
 ) -> tuple[Reservation, ...]:
-    """Label and atomically acquire a computed solution through the daemon.
+    """Atomically acquire one reservation per selected slot group.
 
-    Returns acquired leases; callers release them after use. Label counts must
-    match the solution. Stale placements can be rejected with ReservationError.
+    Returns acquired reservations in group order; callers release them after
+    use. Supply one label per group. Stale slot selections can be rejected
+    with ReservationError.
     """
     return Request(*(
         Reservation(label, *(
             ExplicitSlot(slot.name, ram_mb=slot.ram_mb, compute_units=slot.compute_units)
             for slot in slots
         ))
-        for label, slots in zip(labels, solution, strict=True)
+        for label, slots in zip(labels, slot_groups, strict=True)
     ), socket_path=socket_path).acquire()

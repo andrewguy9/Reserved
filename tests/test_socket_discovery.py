@@ -115,13 +115,13 @@ def test_sdk_acquires_and_releases_through_default_fallback(discovery, atomic):
     assert client._query_status(system)["devices"][0]["available_ram_mb"] == 1024
 
 
-def test_acquire_solution_labels_and_releases_independently(discovery):
+def test_acquire_reservations_labels_and_releases_independently(discovery):
     _, system = discovery
-    solution = sdk.ConsolidateSolver().solve(client._query_status(system)["devices"], [
+    slot_groups = sdk.ConsolidateSolver().solve(client._query_status(system)["devices"], [
         [sdk.DeviceConstraint("cpu", ram_mb=768)],
         [sdk.DeviceConstraint("cpu", ram_mb=256)],
     ])
-    first, second = sdk.acquire_solution(solution, labels=["first", "second"])
+    first, second = sdk.acquire_reservations(slot_groups, labels=["first", "second"])
     try:
         status = client._query_status(system)
         assert [r["label"] for r in status["reservations"]] == ["first", "second"]
@@ -134,7 +134,7 @@ def test_acquire_solution_labels_and_releases_independently(discovery):
         second.check()
         assert client._query_status(system)["devices"][0]["available_ram_mb"] == 768
         with pytest.raises(sdk.ReservationError):
-            sdk.acquire_solution(solution, labels=["first", "second"], socket_path=system)
+            sdk.acquire_reservations(slot_groups, labels=["first", "second"], socket_path=system)
         assert len(client._query_status(system)["reservations"]) == 1
         assert client._query_status(system)["devices"][0]["available_ram_mb"] == 768
     finally:
