@@ -102,7 +102,10 @@ def build_reserve_request(
 
     if devices is None:
         raise ValueError("device status is required for constraint slots")
-    return solver.solve([(label, slots)], devices)
+    solution = solver.solve(devices, [slots])
+    return ReserveRequest(reservations=(
+        ReservationRequest(label=label, slots=solution[0]),
+    ))
 
 
 def build_exec_env(

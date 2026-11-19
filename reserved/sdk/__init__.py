@@ -8,6 +8,7 @@ from .client import (
     GrantedDevice,
     Request,
     Reservation,
+    acquire_solution,
     adopt_inherited_lease,
 )
 from .errors import (
@@ -20,6 +21,7 @@ from .solvers import ConsolidateSolver, SpreadSolver
 
 __all__ = [
     "Reservation",
+    "acquire_solution",
     "adopt_inherited_lease",
     "Request",
     "DeviceConstraint",

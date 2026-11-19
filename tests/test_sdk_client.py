@@ -8,9 +8,17 @@ import types
 
 import pytest
 
-from reserved.sdk.client import GrantedDevice, Reservation, _connect
+from reserved.core import SlotRequest
+from reserved.sdk.client import GrantedDevice, Reservation, _connect, acquire_solution
 from reserved.sdk.errors import DaemonNotRunningError, ReservationError, ReservationExpiredError
 import reserved.sdk.client as client_module
+
+
+@pytest.mark.parametrize("labels", [[], ["one", "two"]])
+def test_acquire_solution_rejects_label_count_mismatch_before_acquisition(monkeypatch, labels):
+    monkeypatch.setattr(client_module.Request, "acquire", lambda _: pytest.fail("acquired"))
+    with pytest.raises(ValueError):
+        acquire_solution(((SlotRequest("cpu", 256),),), labels=labels)
 
 
 def test_connect_translates_missing_socket_to_domain_error(monkeypatch):

@@ -1,9 +1,9 @@
 """
 solvers.py — Constraint solvers for the reserved SDK.
 
-Solvers live entirely in the SDK — they never cross the wire. A solver reads
-the current device status, resolves DeviceConstraint objects to explicit slot
-assignments, and returns a ReserveRequest ready to send to the daemon.
+Solvers are pure computations over supplied capacity and grouped requirements.
+They return explicit slot assignments in input order. Labels, daemon requests,
+and lease acquisition belong to the SDK/CLI shell.
 
 Two built-in solvers:
   - ConsolidateSolver: pack slots onto fewest physical devices (default).
@@ -15,13 +15,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Sequence
 
 if TYPE_CHECKING:
-    from .client import DeviceConstraint, ReservationSpec
+    from .client import DeviceConstraint, ExplicitSlot
 
-from ..core import (
-    ReservationRequest,
-    ReserveRequest,
-    SlotRequest,
-)
+from ..core import SlotRequest
+
+
+Solution = tuple[tuple[SlotRequest, ...], ...]
 
 
 # ---------------------------------------------------------------------------
@@ -56,24 +55,21 @@ class ConsolidateSolver:
 
     def solve(
         self,
-        reservations: list["ReservationSpec"],
-        devices: list[DeviceStatusDict],
-    ) -> ReserveRequest:
+        capacity: list[DeviceStatusDict],
+        requirements: Sequence[Sequence[DeviceConstraint | ExplicitSlot]],
+    ) -> Solution:
         """
-        Resolve constraints to an explicit ReserveRequest.
-
-        *reservations* is a list of (label, slots) where each slot is either a
-        DeviceConstraint or an ExplicitSlot.  *devices* is the list of device
-        dicts from a status response.
+        Return one tuple of assigned slots per requirement group, without IO
+        or changing either input. Raise ValueError when placement fails.
         """
         from .client import DeviceConstraint, ExplicitSlot
 
         # Work with a mutable copy of available capacities for simulation.
-        avail: dict[str, dict] = {d["name"]: dict(d) for d in devices}
+        avail: dict[str, dict] = {d["name"]: dict(d) for d in capacity}
 
-        res_requests: list[ReservationRequest] = []
+        solution: list[tuple[SlotRequest, ...]] = []
 
-        for label, slots in reservations:
+        for slots in requirements:
             slot_requests: list[SlotRequest] = []
             for slot in slots:
                 if isinstance(slot, ExplicitSlot):
@@ -94,8 +90,7 @@ class ConsolidateSolver:
                     ]
                     if not candidates:
                         raise ValueError(
-                            f"no device satisfies constraint {slot!r} "
-                            f"for reservation {label!r}"
+                            f"no device satisfies constraint {slot!r}"
                         )
                     # Consolidate: prefer device with least available RAM
                     # (most full) that still fits.
@@ -108,12 +103,9 @@ class ConsolidateSolver:
                     avail[best["name"]]["available_ram_mb"] -= slot.ram_mb
                     avail[best["name"]]["available_compute_units"] -= slot.compute_units
 
-            res_requests.append(ReservationRequest(
-                label=label,
-                slots=tuple(slot_requests),
-            ))
+            solution.append(tuple(slot_requests))
 
-        return ReserveRequest(reservations=tuple(res_requests))
+        return tuple(solution)
 
 
 class SpreadSolver:
@@ -126,16 +118,16 @@ class SpreadSolver:
 
     def solve(
         self,
-        reservations: list["ReservationSpec"],
-        devices: list[DeviceStatusDict],
-    ) -> ReserveRequest:
+        capacity: list[DeviceStatusDict],
+        requirements: Sequence[Sequence[DeviceConstraint | ExplicitSlot]],
+    ) -> Solution:
         from .client import DeviceConstraint, ExplicitSlot
 
-        avail: dict[str, dict] = {d["name"]: dict(d) for d in devices}
+        avail: dict[str, dict] = {d["name"]: dict(d) for d in capacity}
 
-        res_requests: list[ReservationRequest] = []
+        solution: list[tuple[SlotRequest, ...]] = []
 
-        for label, slots in reservations:
+        for slots in requirements:
             slot_requests: list[SlotRequest] = []
             for slot in slots:
                 if isinstance(slot, ExplicitSlot):
@@ -154,8 +146,7 @@ class SpreadSolver:
                     ]
                     if not candidates:
                         raise ValueError(
-                            f"no device satisfies constraint {slot!r} "
-                            f"for reservation {label!r}"
+                            f"no device satisfies constraint {slot!r}"
                         )
                     # Spread: prefer device with most available RAM (most empty).
                     best = max(candidates, key=lambda d: d["available_ram_mb"])
@@ -167,9 +158,6 @@ class SpreadSolver:
                     avail[best["name"]]["available_ram_mb"] -= slot.ram_mb
                     avail[best["name"]]["available_compute_units"] -= slot.compute_units
 
-            res_requests.append(ReservationRequest(
-                label=label,
-                slots=tuple(slot_requests),
-            ))
+            solution.append(tuple(slot_requests))
 
-        return ReserveRequest(reservations=tuple(res_requests))
+        return tuple(solution)

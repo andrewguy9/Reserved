@@ -36,7 +36,11 @@ slot: type=cuda  ram_mb=8192
 slot: type=cuda  model=rtx3090
 ```
 
-A **constraint solver** resolves constraints against current device status and produces an explicit request before submitting to the daemon.
+A **constraint solver** is a pure computation: `solve(capacity, requirements)`
+returns one tuple of explicit `SlotRequest` assignments per input slot group.
+It reads no daemon state and attaches no labels. The SDK/CLI shell adds labels
+and constructs the explicit daemon request. `acquire_solution(solution,
+labels=...)` acquires an already computed solution through `Request.acquire()`.
 
 ### Constraint solvers
 
@@ -48,9 +52,8 @@ A **constraint solver** resolves constraints against current device status and p
 Any caller can bypass solvers by submitting an explicit request directly to the daemon — this is what sophisticated orchestrators do after running their own placement algorithm.
 
 ```
-Constraint spec  →  Solver (reads status)  →  Explicit request  →  Daemon (check-and-subtract)
-                                                      ↑
-                                       Orchestrators enter here
+Capacity + requirements → Solver → Solution → SDK/CLI labels request → Daemon
+Orchestrator-provided explicit slots ────────→ SDK/CLI labels request → Daemon
 ```
 
 The daemon is unaware of solvers. New solvers can be added without any daemon changes.

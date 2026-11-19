@@ -75,13 +75,9 @@ def test_build_reserve_request_delegates_constraints_to_solver():
         def __init__(self):
             self.calls = []
 
-        def solve(self, specs, devices):
-            self.calls.append((specs, devices))
-            return ReserveRequest(reservations=(
-                ReservationRequest(label=specs[0][0], slots=(
-                    SlotRequest(name=devices[0]["name"], ram_mb=specs[0][1][0].ram_mb),
-                )),
-            ))
+        def solve(self, capacity, requirements):
+            self.calls.append((capacity, requirements))
+            return ((SlotRequest(capacity[0]["name"], requirements[0][0].ram_mb),),)
 
     solver = RecordingSolver()
     devices = [{"name": "cuda:0"}]
@@ -89,7 +85,8 @@ def test_build_reserve_request_delegates_constraints_to_solver():
 
     req = build_reserve_request("job", slots, solver, devices)
 
-    assert solver.calls == [([("job", slots)], devices)]
+    assert solver.calls == [(devices, [slots])]
+    assert req.reservations[0].label == "job"
     assert req.reservations[0].slots[0] == SlotRequest(name="cuda:0", ram_mb=2048)
 
 

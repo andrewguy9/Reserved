@@ -281,6 +281,22 @@ with Reservation("infer", ExplicitSlot("cuda:2", ram_mb=8192)) as r:
     run_model()
 ```
 
+### Acquire a computed solution
+
+Solvers take a capacity snapshot and plain groups of requirements. They return
+slot assignments in the same group order, with no labels or IO:
+
+```python
+from reserved.sdk import SpreadSolver, acquire_solution
+
+solution = SpreadSolver().solve(capacity, requirements)
+reservations = acquire_solution(solution, labels=["worker-0", "worker-1"])
+```
+
+Supply one label per solution group. The returned reservations are already
+acquired; keep them while resources are in use, then call `release()` in a
+`finally` block. The daemon can reject a stale solution with `ReservationError`.
+
 ### Adopt a lease from `reserve`
 
 A Python worker launched by `reserve` can manage the lease it already holds.
