@@ -11,7 +11,7 @@ from reserved import protocol
 from reserved.core import (
     ReservationRequest,
     ReserveRequest,
-    SlotRequest,
+    DeviceAllocation,
     load_ledger,
 )
 from reserved.daemon_state import (
@@ -71,7 +71,7 @@ def reserve_wire(
                 ReservationRequest(
                     label=label,
                     slots=(
-                        SlotRequest(
+                        DeviceAllocation(
                             name=device_name,
                             ram_mb=ram_mb,
                             compute_units=compute_units,
@@ -89,11 +89,11 @@ def multi_reserve_wire() -> bytes:
             reservations=(
                 ReservationRequest(
                     label="train-a",
-                    slots=(SlotRequest(name="cuda:0", ram_mb=4096),),
+                    slots=(DeviceAllocation(name="cuda:0", ram_mb=4096),),
                 ),
                 ReservationRequest(
                     label="train-b",
-                    slots=(SlotRequest(name="cuda:0", ram_mb=2048),),
+                    slots=(DeviceAllocation(name="cuda:0", ram_mb=2048),),
                 ),
             )
         )

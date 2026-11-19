@@ -94,7 +94,7 @@ def test_device_text_and_reservation_labels_are_displayed_literally():
         {"name": name, "type": "cpu", "model": "<board>", "ram_mb": 2048},
     ]})
     ledger, result = core.grant(ledger, core.ReserveRequest(reservations=(
-        core.ReservationRequest(label, (core.SlotRequest(name, ram_mb=256),)),
+        core.ReservationRequest(label, (core.DeviceAllocation(name, ram_mb=256),)),
     )))
     assert result.ok
 

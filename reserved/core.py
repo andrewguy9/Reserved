@@ -34,7 +34,7 @@ class DeviceAvailability:
 
 
 @dataclass(frozen=True)
-class SlotRequest:
+class DeviceAllocation:
     """An explicit slot in a reserve request — names a specific device."""
     name: str          # physical device name, e.g. "cuda:0"
     ram_mb: int = 0
@@ -45,7 +45,7 @@ class SlotRequest:
 class ReservationRequest:
     """One reservation in a reserve request."""
     label: str
-    slots: tuple[SlotRequest, ...]
+    slots: tuple[DeviceAllocation, ...]
 
 
 @dataclass(frozen=True)

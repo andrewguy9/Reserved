@@ -276,10 +276,58 @@ that capacity before releasing it; Reserved does not free GPU memory itself.
 
 ```python
 # Pin directly to a physical device
-with Reservation("infer", ExplicitSlot("cuda:2", ram_mb=8192)) as r:
+with Reservation("infer", DeviceConstraint(name="cuda:2", ram_mb=8192)) as r:
     model.to(r.devices[0].torch_device())
     run_model()
 ```
+
+### Solve placement separately from acquisition
+
+SDK `ReservationSpec` records describe requirements; concrete `ReservationRequest`
+records contain named device assignments. Given `capacity`, the `devices` list
+from a daemon status response, solving is pure:
+
+```python
+from reserved.sdk import (
+    DeviceConstraint, NoPlacement, ReservationSpec, acquire_reservations,
+    solve_reservations_spread,
+)
+
+specifications = [
+    ReservationSpec("worker-0", (DeviceConstraint("cpu", ram_mb=256),)),
+    ReservationSpec("worker-1", (DeviceConstraint("cpu", ram_mb=256),)),
+]
+placement = solve_reservations_spread(capacity, specifications)
+if isinstance(placement, NoPlacement):
+    print(placement.reason)  # The application decides whether to retry.
+else:
+    reservations = acquire_reservations(placement)
+    try:
+        for reservation in reservations:
+            reservation.check()
+            # Start and supervise the worker while retaining this handle.
+    finally:
+        for reservation in reservations:
+            reservation.release()
+```
+
+Each policy attempts every specification and returns one complete candidate or
+`NoPlacement`; failure does not return a partial batch. Labels are carried as
+metadata, and inputs remain unchanged. These are greedy policies, not exhaustive
+searches. `DeviceConstraint(name="cuda:2", ...)` pins a requirement while still
+checking its type, model, and resource constraints. `ExplicitSlot(...)` remains
+a compatibility constructor for a named `DeviceConstraint`.
+
+Acquisition does no solving or status query. The daemon can reject a stale
+placement with `ReservationError`. Returned handles are already acquired and
+release independently. For the combined workflow, use
+`Request(..., solver=solve_reservations_spread).acquire()`.
+
+Custom solvers are ordinary functions with signature
+`(capacity, reservation_specs) -> list[ReservationRequest] | NoPlacement`. This replaces
+the previous `ConsolidateSolver`/`SpreadSolver` objects and their `.solve()`
+method. Choose the solver on `Request`, including for a batch containing just
+one reservation; the former `Reservation(..., solver=...)` argument is removed.
 
 ### Adopt a lease from `reserve`
 

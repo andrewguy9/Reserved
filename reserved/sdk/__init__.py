@@ -8,6 +8,8 @@ from .client import (
     GrantedDevice,
     Request,
     Reservation,
+    ReservationSpec,
+    acquire_reservations,
     adopt_inherited_lease,
 )
 from .errors import (
@@ -16,17 +18,30 @@ from .errors import (
     ReservationError,
     ReservationExpiredError,
 )
-from .solvers import ConsolidateSolver, SpreadSolver
+from reserved.core import ReservationRequest, ReserveRequest, DeviceAllocation
+from .solvers import (
+    NoPlacement,
+    ReservationSolver,
+    solve_reservations_consolidated,
+    solve_reservations_spread,
+)
 
 __all__ = [
     "Reservation",
+    "acquire_reservations",
     "adopt_inherited_lease",
     "Request",
     "DeviceConstraint",
     "ExplicitSlot",
     "GrantedDevice",
-    "ConsolidateSolver",
-    "SpreadSolver",
+    "ReservationSpec",
+    "ReservationRequest",
+    "ReserveRequest",
+    "DeviceAllocation",
+    "NoPlacement",
+    "ReservationSolver",
+    "solve_reservations_consolidated",
+    "solve_reservations_spread",
     "ReservationError",
     "DaemonNotRunningError",
     "ReservationExpiredError",

@@ -12,7 +12,7 @@ from reserved.core import (
     GrantedSlot,
     ReservationRequest,
     ReserveRequest,
-    SlotRequest,
+    DeviceAllocation,
     StatusResult,
     DeviceStatus,
     ReservationStatus,
@@ -60,7 +60,7 @@ class TestReserveRequestWire:
             ReservationRequest(
                 label="train",
                 slots=(
-                    SlotRequest(name="cuda:0", ram_mb=8192, compute_units=50),
+                    DeviceAllocation(name="cuda:0", ram_mb=8192, compute_units=50),
                 ),
             ),
         ))
@@ -105,8 +105,8 @@ class TestReserveRequestWire:
 
     def test_multi_reservation_roundtrip(self):
         req = ReserveRequest(reservations=(
-            ReservationRequest(label="a", slots=(SlotRequest(name="cuda:0", ram_mb=4096),)),
-            ReservationRequest(label="b", slots=(SlotRequest(name="cuda:1", ram_mb=2048),)),
+            ReservationRequest(label="a", slots=(DeviceAllocation(name="cuda:0", ram_mb=4096),)),
+            ReservationRequest(label="b", slots=(DeviceAllocation(name="cuda:1", ram_mb=2048),)),
         ))
         wire = reserve_request_to_wire(req)
         obj = parse_request(wire)

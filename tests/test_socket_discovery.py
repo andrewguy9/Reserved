@@ -115,6 +115,57 @@ def test_sdk_acquires_and_releases_through_default_fallback(discovery, atomic):
     assert client._query_status(system)["devices"][0]["available_ram_mb"] == 1024
 
 
+def test_acquire_reservations_labels_and_releases_independently(discovery, monkeypatch):
+    _, system = discovery
+    placement = sdk.solve_reservations_consolidated(client._query_status(system)["devices"], [
+        sdk.ReservationSpec("first", (sdk.DeviceConstraint("cpu", ram_mb=768),)),
+        sdk.ReservationSpec("second", (sdk.DeviceConstraint("cpu", ram_mb=256),)),
+    ])
+    with monkeypatch.context() as direct_acquisition:
+        direct_acquisition.setattr(client, "_query_status", lambda _: pytest.fail("queried status"))
+        first, second = sdk.acquire_reservations(placement)
+    try:
+        status = client._query_status(system)
+        assert [r["label"] for r in status["reservations"]] == ["first", "second"]
+        assert status["devices"][0]["available_ram_mb"] == 0
+        first.release()
+        deadline = time.monotonic() + 5
+        while len(client._query_status(system)["reservations"]) != 1:
+            assert time.monotonic() < deadline, "first lease was not reclaimed"
+            time.sleep(0.01)
+        second.check()
+        assert client._query_status(system)["devices"][0]["available_ram_mb"] == 768
+        with pytest.raises(sdk.ReservationError):
+            sdk.acquire_reservations(placement, socket_path=system)
+        assert len(client._query_status(system)["reservations"]) == 1
+        assert client._query_status(system)["devices"][0]["available_ram_mb"] == 768
+    finally:
+        first.release()
+        second.release()
+
+
+@pytest.mark.parametrize("worker_count", [1, 2])
+def test_application_can_supply_a_plain_solver_function(discovery, worker_count):
+    _, system = discovery
+    def custom_solver(capacity, specs):
+        assert capacity[0]["name"] == "cpu"
+        return [
+            sdk.ReservationRequest(spec.label, (sdk.DeviceAllocation("cpu", 256),))
+            for spec in specs
+        ]
+    workers = [sdk.Reservation(f"custom-{index}", sdk.DeviceConstraint("cpu"))
+               for index in range(worker_count)]
+    try:
+        assert sdk.Request(*workers, solver=custom_solver).acquire() == tuple(workers)
+        for worker in workers:
+            worker.check()
+            assert worker.devices[0].device_name == "cpu"
+        assert client._query_status(system)["devices"][0]["available_ram_mb"] == 1024 - 256 * worker_count
+    finally:
+        for worker in workers:
+            worker.release()
+
+
 def test_reserve_cli_uses_default_fallback(discovery):
     _, system = discovery
     # Redirect only the platform default in the child, keeping real transport,

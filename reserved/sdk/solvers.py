@@ -1,175 +1,100 @@
-"""
-solvers.py — Constraint solvers for the reserved SDK.
+"""Pure, greedy placement functions. Only their explicit results reach the daemon.
 
-Solvers live entirely in the SDK — they never cross the wire. A solver reads
-the current device status, resolves DeviceConstraint objects to explicit slot
-assignments, and returns a ReserveRequest ready to send to the daemon.
-
-Two built-in solvers:
-  - ConsolidateSolver: pack slots onto fewest physical devices (default).
-  - SpreadSolver: distribute slots across as many physical devices as possible.
+Each policy attempts every reservation in declaration order and returns one
+concrete batch, or NoPlacement. It does not enumerate alternatives or return a
+partial batch. All inputs are rich device constraints, including optional pins.
+The daemon is authoritative about whether selected assignments can be acquired.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable, Sequence
+
+from ..core import ReservationRequest, DeviceAllocation
 
 if TYPE_CHECKING:
     from .client import DeviceConstraint, ReservationSpec
 
-from ..core import (
-    ReservationRequest,
-    ReserveRequest,
-    SlotRequest,
-)
+
+DeviceStatusDict = dict
 
 
-# ---------------------------------------------------------------------------
-# Type alias for a parsed status response (dict from JSON)
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class NoPlacement:
+    """This policy found no complete placement; not a proof of infeasibility."""
 
-DeviceStatusDict = dict  # keys: name, type, model, ram_mb, available_ram_mb, etc.
-
-
-def _matches(device: DeviceStatusDict, constraint: "DeviceConstraint") -> bool:
-    """Return True if *device* satisfies *constraint*."""
-    from .client import DeviceConstraint  # local import to avoid circular
-    if constraint.type is not None and device["type"] != constraint.type:
-        return False
-    if constraint.model is not None and device.get("model") != constraint.model:
-        return False
-    if device["available_ram_mb"] < constraint.ram_mb:
-        return False
-    if device["available_compute_units"] < constraint.compute_units:
-        return False
-    return True
+    reason: str
 
 
-class ConsolidateSolver:
-    """
-    Pack slots onto as few physical devices as possible.
+ReservationSolver = Callable[
+    [Sequence[DeviceStatusDict], Sequence["ReservationSpec"]],
+    list[ReservationRequest] | NoPlacement,
+]
 
-    For each constraint, pick the eligible device that has the least remaining
-    available RAM (i.e. most full) while still satisfying the constraint.
-    This leaves the maximum contiguous free capacity on other devices.
-    """
 
-    def solve(
-        self,
-        reservations: list["ReservationSpec"],
-        devices: list[DeviceStatusDict],
-    ) -> ReserveRequest:
-        """
-        Resolve constraints to an explicit ReserveRequest.
+def _matches(device: DeviceStatusDict, requirement: DeviceConstraint) -> bool:
+    return (
+        (requirement.name is None or device["name"] == requirement.name)
+        and (requirement.type is None or device["type"] == requirement.type)
+        and (requirement.model is None or device.get("model") == requirement.model)
+        and device["available_ram_mb"] >= requirement.ram_mb
+        and device["available_compute_units"] >= requirement.compute_units
+    )
 
-        *reservations* is a list of (label, slots) where each slot is either a
-        DeviceConstraint or an ExplicitSlot.  *devices* is the list of device
-        dicts from a status response.
-        """
-        from .client import DeviceConstraint, ExplicitSlot
 
-        # Work with a mutable copy of available capacities for simulation.
-        avail: dict[str, dict] = {d["name"]: dict(d) for d in devices}
+def _place_reservations(
+    capacity: Sequence[DeviceStatusDict],
+    reservation_specs: Sequence[ReservationSpec],
+    rank_device: Callable[[DeviceStatusDict], int],
+) -> list[ReservationRequest] | NoPlacement:
+    available = {device["name"]: dict(device) for device in capacity}
+    reservation_requests = []
+    for reservation_spec in reservation_specs:
+        assignments = []
+        for requirement in reservation_spec.requirements:
+            candidates = [
+                device for device in available.values()
+                if _matches(device, requirement)
+            ]
+            if not candidates:
+                return NoPlacement(
+                    f"no device satisfies constraint {requirement!r} "
+                    f"for reservation {reservation_spec.label!r}"
+                )
+            selected_device = min(candidates, key=rank_device)
+            device_name = selected_device["name"]
 
-        res_requests: list[ReservationRequest] = []
-
-        for label, slots in reservations:
-            slot_requests: list[SlotRequest] = []
-            for slot in slots:
-                if isinstance(slot, ExplicitSlot):
-                    slot_requests.append(SlotRequest(
-                        name=slot.name,
-                        ram_mb=slot.ram_mb,
-                        compute_units=slot.compute_units,
-                    ))
-                    # Update simulated availability.
-                    if slot.name in avail:
-                        avail[slot.name]["available_ram_mb"] -= slot.ram_mb
-                        avail[slot.name]["available_compute_units"] -= slot.compute_units
-                else:
-                    # DeviceConstraint — find best device.
-                    candidates = [
-                        d for d in avail.values()
-                        if _matches(d, slot)
-                    ]
-                    if not candidates:
-                        raise ValueError(
-                            f"no device satisfies constraint {slot!r} "
-                            f"for reservation {label!r}"
-                        )
-                    # Consolidate: prefer device with least available RAM
-                    # (most full) that still fits.
-                    best = min(candidates, key=lambda d: d["available_ram_mb"])
-                    slot_requests.append(SlotRequest(
-                        name=best["name"],
-                        ram_mb=slot.ram_mb,
-                        compute_units=slot.compute_units,
-                    ))
-                    avail[best["name"]]["available_ram_mb"] -= slot.ram_mb
-                    avail[best["name"]]["available_compute_units"] -= slot.compute_units
-
-            res_requests.append(ReservationRequest(
-                label=label,
-                slots=tuple(slot_requests),
+            assignments.append(DeviceAllocation(
+                device_name, requirement.ram_mb, requirement.compute_units,
             ))
+            selected_device["available_ram_mb"] -= requirement.ram_mb
+            selected_device["available_compute_units"] -= requirement.compute_units
 
-        return ReserveRequest(reservations=tuple(res_requests))
+        reservation_requests.append(ReservationRequest(
+            reservation_spec.label, tuple(assignments),
+        ))
+    return reservation_requests
 
 
-class SpreadSolver:
+def solve_reservations_consolidated(
+    capacity: Sequence[DeviceStatusDict],
+    reservation_specs: Sequence[ReservationSpec],
+) -> list[ReservationRequest] | NoPlacement:
+    """Greedily prefer eligible devices with less available RAM, without IO.
+
+    Labels and reservation order are preserved; neither input is changed.
     """
-    Distribute slots across as many physical devices as possible.
+    return _place_reservations(
+        capacity, reservation_specs, lambda device: device["available_ram_mb"],
+    )
 
-    For each constraint, pick the eligible device that has the most remaining
-    available RAM (i.e. most empty). This maximises parallel throughput.
-    """
 
-    def solve(
-        self,
-        reservations: list["ReservationSpec"],
-        devices: list[DeviceStatusDict],
-    ) -> ReserveRequest:
-        from .client import DeviceConstraint, ExplicitSlot
-
-        avail: dict[str, dict] = {d["name"]: dict(d) for d in devices}
-
-        res_requests: list[ReservationRequest] = []
-
-        for label, slots in reservations:
-            slot_requests: list[SlotRequest] = []
-            for slot in slots:
-                if isinstance(slot, ExplicitSlot):
-                    slot_requests.append(SlotRequest(
-                        name=slot.name,
-                        ram_mb=slot.ram_mb,
-                        compute_units=slot.compute_units,
-                    ))
-                    if slot.name in avail:
-                        avail[slot.name]["available_ram_mb"] -= slot.ram_mb
-                        avail[slot.name]["available_compute_units"] -= slot.compute_units
-                else:
-                    candidates = [
-                        d for d in avail.values()
-                        if _matches(d, slot)
-                    ]
-                    if not candidates:
-                        raise ValueError(
-                            f"no device satisfies constraint {slot!r} "
-                            f"for reservation {label!r}"
-                        )
-                    # Spread: prefer device with most available RAM (most empty).
-                    best = max(candidates, key=lambda d: d["available_ram_mb"])
-                    slot_requests.append(SlotRequest(
-                        name=best["name"],
-                        ram_mb=slot.ram_mb,
-                        compute_units=slot.compute_units,
-                    ))
-                    avail[best["name"]]["available_ram_mb"] -= slot.ram_mb
-                    avail[best["name"]]["available_compute_units"] -= slot.compute_units
-
-            res_requests.append(ReservationRequest(
-                label=label,
-                slots=tuple(slot_requests),
-            ))
-
-        return ReserveRequest(reservations=tuple(res_requests))
+def solve_reservations_spread(
+    capacity: Sequence[DeviceStatusDict],
+    reservation_specs: Sequence[ReservationSpec],
+) -> list[ReservationRequest] | NoPlacement:
+    """Greedily prefer eligible devices with more available RAM, without IO."""
+    return _place_reservations(
+        capacity, reservation_specs, lambda device: -device["available_ram_mb"],
+    )
