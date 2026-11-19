@@ -20,13 +20,13 @@ import reserved.sdk.client as client_module
 
 @pytest.mark.parametrize("outcome, message", [
     (NoPlacement("no room"), "no room"),
-    (ReserveRequest(()), "exactly one reservation"),
-    (ReserveRequest((ReservationRequest("worker", ()), ReservationRequest("extra", ()))),
+    ([], "exactly one reservation"),
+    ([ReservationRequest("worker", ()), ReservationRequest("extra", ())],
      "exactly one reservation"),
-    (ReserveRequest((ReservationRequest("wrong", ()),)), "labels and order"),
-    (ReserveRequest((ReservationRequest("worker", (DeviceConstraint("cpu"),)),)),
+    ([ReservationRequest("wrong", ())], "labels and order"),
+    ([ReservationRequest("worker", (DeviceConstraint("cpu"),))],
      "explicit SlotRequest"),
-    ((), "ReserveRequest or NoPlacement"),
+    (object(), "reservation requests or NoPlacement"),
 ])
 @pytest.mark.parametrize("standalone", [False, True])
 def test_invalid_solver_outcomes_fail_before_acquisition(monkeypatch, outcome, message, standalone):
@@ -50,13 +50,14 @@ def test_batch_does_not_infer_a_solver_from_a_member(monkeypatch):
 
 def test_empty_acquisition_needs_no_daemon(monkeypatch):
     monkeypatch.setattr(client_module, "_connect", lambda _: pytest.fail("connected"))
-    assert acquire_reservations(ReserveRequest(())) == ()
+    assert acquire_reservations([]) == ()
     assert Request().acquire() == ()
 
 
 @pytest.mark.parametrize("concrete_input", [
     NoPlacement("no room"),
-    ReserveRequest((ReservationRequest("worker", (DeviceConstraint("cpu"),)),)),
+    "",
+    [ReservationRequest("worker", (DeviceConstraint("cpu"),))],
 ])
 def test_acquisition_requires_concrete_input_before_connecting(monkeypatch, concrete_input):
     monkeypatch.setattr(client_module, "_connect", lambda _: pytest.fail("connected"))
@@ -79,9 +80,9 @@ def test_failed_acquisition_closes_attached_and_unattached_lease_descriptors(mon
     monkeypatch.setattr(client_module, "_send_reserve", lambda *_: (response, descriptors))
     try:
         with pytest.raises((ReservationError, KeyError)):
-            acquire_reservations(ReserveRequest((
+            acquire_reservations([
                 ReservationRequest("first", ()), ReservationRequest("second", ()),
-            )))
+            ])
         for _, peer in leases:
             peer.settimeout(1)
             assert peer.recv(1) == b""

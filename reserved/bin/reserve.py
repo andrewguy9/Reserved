@@ -17,7 +17,6 @@ from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
 from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import (
     DeviceConstraint,
-    ExplicitSlot,
     ReservationSpec,
     _get_socket_override,
     _query_status,
@@ -48,7 +47,7 @@ SLOT format: comma-separated key=value pairs.
     model=MODEL      Device model label
     ram=MB           RAM in MB (alias for ram_mb)
     compute=N        Compute units (alias for compute_units)
-    name=NAME        Pin to a physical device (bypasses solver)
+    name=NAME        Require a specific physical device
 
 Examples:
     reserve train type=cuda,ram=8192 -- python train.py
@@ -57,7 +56,7 @@ Examples:
 """
 
 
-def parse_slot(spec: str) -> DeviceConstraint | ExplicitSlot:
+def parse_slot(spec: str) -> DeviceConstraint:
     """Parse a SLOT string like 'type=cuda,ram=8192' into a slot descriptor."""
     fields: dict[str, str] = {}
     for part in spec.split(","):
@@ -69,54 +68,38 @@ def parse_slot(spec: str) -> DeviceConstraint | ExplicitSlot:
         key, _, value = part.partition("=")
         fields[key.strip()] = value.strip()
 
-    physical_name = fields.get("name")
-    if physical_name is not None:
-        # Explicit slot.
-        ram_mb = int(fields.get("ram", fields.get("ram_mb", 0)))
-        compute_units = int(fields.get("compute", fields.get("compute_units", 0)))
-        return ExplicitSlot(name=physical_name, ram_mb=ram_mb, compute_units=compute_units)
-    else:
-        # Constraint slot.
-        return DeviceConstraint(
-            type=fields.get("type"),
-            model=fields.get("model"),
-            ram_mb=int(fields.get("ram", fields.get("ram_mb", 0))),
-            compute_units=int(fields.get("compute", fields.get("compute_units", 0))),
-        )
+    return DeviceConstraint(
+        name=fields.get("name"),
+        type=fields.get("type"),
+        model=fields.get("model"),
+        ram_mb=int(fields.get("ram", fields.get("ram_mb", 0))),
+        compute_units=int(fields.get("compute", fields.get("compute_units", 0))),
+    )
 
 
 def build_reserve_request(
     label: str,
-    slots: list[DeviceConstraint | ExplicitSlot],
+    slots: list[DeviceConstraint],
     solver: ReservationSolver,
     devices: list[dict] | None = None,
 ) -> ReserveRequest:
     """Build the explicit daemon request for already-parsed CLI slots."""
-    all_explicit = all(isinstance(s, ExplicitSlot) for s in slots)
-
-    if all_explicit or not slots:
-        slot_reqs = [
-            SlotRequest(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
-            for s in slots
-            if isinstance(s, ExplicitSlot)
-        ]
-        return ReserveRequest(reservations=(
-            ReservationRequest(label=label, slots=tuple(slot_reqs)),
-        ))
-
     if devices is None:
         raise ValueError("device status is required for constraint slots")
     placement = solver(devices, [ReservationSpec(label, tuple(slots))])
     if isinstance(placement, NoPlacement):
         raise ValueError(placement.reason)
-    if not isinstance(placement, ReserveRequest) or len(placement.reservations) != 1:
-        raise ValueError("solver must return exactly one reservation for this command")
-    if placement.reservations[0].label != label:
+    match placement:
+        case [ReservationRequest() as reservation_request]:
+            pass
+        case _:
+            raise ValueError("solver must return exactly one reservation for this command")
+    if reservation_request.label != label:
         raise ValueError("solver must preserve the reservation label")
     if any(not isinstance(assignment, SlotRequest)
-           for assignment in placement.reservations[0].slots):
+           for assignment in reservation_request.slots):
         raise ValueError("solver must return explicit SlotRequest assignments")
-    return placement
+    return ReserveRequest((reservation_request,))
 
 
 def build_exec_env(
@@ -181,21 +164,17 @@ def main(argv: list[str] | None = None) -> None:
     slots = [parse_slot(spec) for spec in args["SLOT"]]
     label = args["LABEL"]
 
-    if all(isinstance(s, ExplicitSlot) for s in slots) or not slots:
-        req = build_reserve_request(label, slots, solver)
-    else:
-        # Run solver.
-        try:
-            status = _query_status(socket_path)
-        except DaemonNotRunningError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            sys.exit(2)
+    try:
+        status = _query_status(socket_path)
+    except DaemonNotRunningError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
-        try:
-            req = build_reserve_request(label, slots, solver, status["devices"])
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            sys.exit(1)
+    try:
+        req = build_reserve_request(label, slots, solver, status["devices"])
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     # Submit request to daemon.
     try:

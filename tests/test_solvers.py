@@ -10,7 +10,7 @@ from reserved.sdk.client import DeviceConstraint, ExplicitSlot, ReservationSpec
 from reserved.sdk.solvers import (
     NoPlacement, solve_reservations_consolidated, solve_reservations_spread,
 )
-from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
+from reserved.core import ReservationRequest, SlotRequest
 
 
 DEVICES = [
@@ -67,9 +67,9 @@ POLICIES = [solve_reservations_consolidated, solve_reservations_spread]
 ])
 def test_policy_selects_expected_device(solver, requirement, device_name):
     placement = solver(DEVICES, [ReservationSpec("worker", (requirement,))])
-    assert placement == ReserveRequest((ReservationRequest("worker", (
+    assert placement == [ReservationRequest("worker", (
         SlotRequest(device_name, requirement.ram_mb, requirement.compute_units),
-    )),))
+    ))]
 
 
 @pytest.mark.parametrize("solver", POLICIES)
@@ -78,16 +78,19 @@ def test_explicit_assignments_keep_names_and_amounts(solver):
         ExplicitSlot("cuda:1", ram_mb=2048, compute_units=25),
         ExplicitSlot("cuda:2", ram_mb=4096),
     ))])
-    assert placement == ReserveRequest((ReservationRequest("pinned", (
+    assert placement == [ReservationRequest("pinned", (
         SlotRequest("cuda:1", 2048, 25), SlotRequest("cuda:2", 4096),
-    )),))
+    ))]
 
 
 @pytest.mark.parametrize("solver", POLICIES)
-def test_explicit_passthrough_still_leaves_validation_to_daemon(solver):
-    assert solver([], [ReservationSpec("pinned", (ExplicitSlot("cuda:99"),))]) == (
-        ReserveRequest((ReservationRequest("pinned", (SlotRequest("cuda:99"),)),))
-    )
+@pytest.mark.parametrize("requirement", [
+    DeviceConstraint(name="cuda:99"),
+    DeviceConstraint(name="cuda:1", type="cpu"),
+    DeviceConstraint(name="cuda:1", ram_mb=8193),
+])
+def test_named_constraints_must_satisfy_all_declared_requirements(solver, requirement):
+    assert isinstance(solver(DEVICES, [ReservationSpec("pinned", (requirement,))]), NoPlacement)
 
 
 @pytest.mark.parametrize("solver", POLICIES)
@@ -125,17 +128,15 @@ def test_multiple_devices_within_one_reservation(solver):
     assert solver(capacity, [ReservationSpec("distributed", (
         DeviceConstraint("cuda", ram_mb=6000),
         DeviceConstraint("cuda", ram_mb=6000),
-    ))]) == ReserveRequest((ReservationRequest("distributed", (
+    ))]) == [ReservationRequest("distributed", (
         SlotRequest("cuda:0", 6000), SlotRequest("cuda:1", 6000),
-    )),))
+    ))]
 
 
 @pytest.mark.parametrize("solver", POLICIES)
 def test_empty_batch_and_marker_reservation_are_distinct_successes(solver):
-    assert solver([], []) == ReserveRequest(())
-    assert solver([], [ReservationSpec("marker", ())]) == (
-        ReserveRequest((ReservationRequest("marker", ()),))
-    )
+    assert solver([], []) == []
+    assert solver([], [ReservationSpec("marker", ())]) == [ReservationRequest("marker", ())]
 
 
 @pytest.mark.parametrize("solver", POLICIES)
@@ -145,11 +146,11 @@ def test_results_preserve_labels_order_and_inputs_on_success_and_failure(solver)
     specs = [ReservationSpec("first", worker), ReservationSpec("second", worker),
              ReservationSpec("marker", ())]
     original = deepcopy((capacity, specs))
-    expected = ReserveRequest((
+    expected = [
         ReservationRequest("first", (SlotRequest("cpu", 1024),)),
         ReservationRequest("second", (SlotRequest("cpu", 1024),)),
         ReservationRequest("marker", ()),
-    ))
+    ]
     assert solver(capacity, specs) == expected
     assert solver(capacity, specs) == expected
     assert (capacity, specs) == original

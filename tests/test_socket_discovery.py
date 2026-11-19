@@ -149,10 +149,10 @@ def test_application_can_supply_a_plain_solver_function(discovery, standalone):
     _, system = discovery
     def custom_solver(capacity, specs):
         assert capacity[0]["name"] == "cpu"
-        return sdk.ReserveRequest(tuple(
+        return [
             sdk.ReservationRequest(spec.label, (sdk.SlotRequest("cpu", 256),))
             for spec in specs
-        ))
+        ]
     worker = sdk.Reservation("custom", sdk.DeviceConstraint("cpu"),
                              solver=custom_solver if standalone else None)
     try:

@@ -38,18 +38,19 @@ slot: type=cuda  model=rtx3090
 
 A **constraint solver** is an ordinary pure function taking a supplied capacity
 snapshot and SDK `ReservationSpec` records. Each specification contains a label
-and device requirements. The function carries labels unchanged and returns a
-concrete `ReserveRequest`, or `NoPlacement(reason)` when its policy finds no
-complete placement. An empty specification batch is a successful empty request.
+and rich `DeviceConstraint` requirements, including an optional physical device
+`name`. The function carries labels unchanged and returns a list of concrete
+`ReservationRequest` records, or `NoPlacement(reason)` when its policy finds no
+complete placement. An empty specification batch successfully returns `[]`.
 There is no IO or input mutation in solving.
 
-`acquire_reservations(request)` submits an already concrete batch without
+`acquire_reservations(reservation_requests)` submits a concrete batch without
 querying status or invoking a solver. `Request(..., solver=...)` is the convenience
 workflow that obtains status, calls the chosen function, checks the returned
 reservation count and order, and acquires the batch. It chooses one solver for
 the batch; conflicting standalone solver choices on member reservations are
-rejected. Even explicit declarations passed through this convenience workflow
-use a status snapshot; callers with concrete requests can acquire them directly.
+rejected. Named requirements use the same constraint matching as other inputs;
+callers with concrete requests can acquire them directly.
 
 ### Constraint solvers
 
@@ -60,8 +61,8 @@ use a status snapshot; callers with concrete requests can acquire them directly.
 
 Both policies attempt all specifications in order and produce one complete
 candidate, never a partial batch. They do not enumerate alternatives or prove
-infeasibility. Explicit assignments retain passthrough behavior; the daemon
-checks whether their named devices and amounts can actually be acquired.
+infeasibility. A named requirement must satisfy its other constraints and fit the
+supplied snapshot. The daemon rechecks current capacity at acquisition.
 Best-effort placement and richer optimization semantics are outside this API.
 
 Any caller can bypass solvers by submitting an explicit request directly to the daemon — this is what sophisticated orchestrators do after running their own placement algorithm.
@@ -282,9 +283,10 @@ reserved/
 
 ### Language boundaries
 
-The constraint language never crosses a process boundary. `DeviceConstraint`,
-`ExplicitSlot`, and `ReservationSpec` are SDK objects. Only concrete requests
-hit the wire; `protocol.py` never touches constraint types. The parser requires
+The constraint language never crosses a process boundary. `DeviceConstraint`
+and `ReservationSpec` are SDK objects. `ExplicitSlot(...)` is a compatibility
+constructor returning `DeviceConstraint(name=...)`, not a second input type.
+Only concrete requests hit the wire; `protocol.py` never touches constraint types. The parser requires
 a physical device name for each slot but currently ignores additional fields.
 
 ---

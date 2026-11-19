@@ -5,7 +5,7 @@ Public API:
   Reservation(label, *slots, solver=None, socket_path=None)
   adopt_inherited_lease()
   Request(*reservations, solver=None, socket_path=None)
-  acquire_reservations(request: ReserveRequest, *, socket_path=None)
+  acquire_reservations(reservation_requests, *, socket_path=None)
   ReservationSpec(label, requirements)
   DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)
   ExplicitSlot(name, *, ram_mb=0, compute_units=0)
@@ -59,8 +59,9 @@ os.register_at_fork(after_in_child=_reset_inherited_lease_lock)
 
 @dataclass
 class DeviceConstraint:
-    """A constraint-based slot — the solver picks the device."""
+    """Device requirements, optionally pinned to one physical device by name."""
     type: str | None = None
+    name: str | None = None
     model: str | None = None
     ram_mb: int = 0
     compute_units: int = 0
@@ -69,27 +70,21 @@ class DeviceConstraint:
         self,
         type: str | None = None,
         *,
+        name: str | None = None,
         model: str | None = None,
         ram_mb: int = 0,
         compute_units: int = 0,
     ) -> None:
         self.type = type
+        self.name = name
         self.model = model
         self.ram_mb = ram_mb
         self.compute_units = compute_units
 
 
-@dataclass
-class ExplicitSlot:
-    """An explicit slot — directly names a physical device."""
-    name: str  # Physical device name, e.g. "cuda:2".
-    ram_mb: int = 0
-    compute_units: int = 0
-
-    def __init__(self, name: str, *, ram_mb: int = 0, compute_units: int = 0) -> None:
-        self.name = name
-        self.ram_mb = ram_mb
-        self.compute_units = compute_units
+def ExplicitSlot(name: str, *, ram_mb: int = 0, compute_units: int = 0) -> DeviceConstraint:
+    """Compatibility constructor for DeviceConstraint(name=...)."""
+    return DeviceConstraint(name=name, ram_mb=ram_mb, compute_units=compute_units)
 
 
 @dataclass(frozen=True)
@@ -97,7 +92,7 @@ class ReservationSpec:
     """SDK placement input for one reservation; its label is carried unchanged."""
 
     label: str
-    requirements: tuple[DeviceConstraint | ExplicitSlot, ...]
+    requirements: tuple[DeviceConstraint, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +290,7 @@ class Reservation:
     def __init__(
         self,
         label: str,
-        *slots: DeviceConstraint | ExplicitSlot,
+        *slots: DeviceConstraint,
         solver: ReservationSolver | None = None,
         socket_path: str | None = None,
     ) -> None:
@@ -519,7 +514,7 @@ class Request:
 
 
 def acquire_reservations(
-    request: ReserveRequest,
+    reservation_requests: Sequence[ReservationRequest],
     *,
     socket_path: str | None = None,
 ) -> tuple[Reservation, ...]:
@@ -529,40 +524,49 @@ def acquire_reservations(
     placements. Results retain request order and have independent leases.
     Call release() in a finally block after use.
     """
-    if not isinstance(request, ReserveRequest):
-        raise TypeError("acquisition requires a concrete ReserveRequest")
+    if (
+        not isinstance(reservation_requests, Sequence)
+        or isinstance(reservation_requests, (str, bytes))
+        or any(not isinstance(request, ReservationRequest) for request in reservation_requests)
+    ):
+        raise TypeError("acquisition requires concrete ReservationRequest records")
     reservations = []
-    for reservation_request in request.reservations:
+    for reservation_request in reservation_requests:
         assignments = []
         for assignment in reservation_request.slots:
             if not isinstance(assignment, SlotRequest):
                 raise TypeError("acquisition requires explicit SlotRequest assignments")
-            assignments.append(ExplicitSlot(
-                assignment.name, ram_mb=assignment.ram_mb,
+            assignments.append(DeviceConstraint(
+                name=assignment.name, ram_mb=assignment.ram_mb,
                 compute_units=assignment.compute_units,
             ))
         reservations.append(Reservation(reservation_request.label, *assignments))
-    return _acquire_into(request, reservations, _get_socket_override(socket_path))
+    return _acquire_into(reservation_requests, reservations, _get_socket_override(socket_path))
 
 
 def _acquire_into(
-    request: ReserveRequest,
+    reservation_requests: Sequence[ReservationRequest],
     reservations: Sequence[Reservation],
     socket_path: str | None,
 ) -> tuple[Reservation, ...]:
     """Acquire explicit requests into SDK handles; own received fds until attached."""
-    if not isinstance(request, ReserveRequest):
-        raise ReservationError("solver must return ReserveRequest or NoPlacement")
-    if len(request.reservations) != len(reservations):
+    if (
+        not isinstance(reservation_requests, Sequence)
+        or isinstance(reservation_requests, (str, bytes))
+        or any(not isinstance(request, ReservationRequest) for request in reservation_requests)
+    ):
+        raise ReservationError("solver must return reservation requests or NoPlacement")
+    if len(reservation_requests) != len(reservations):
         raise ReservationError("solver must return exactly one reservation per specification")
-    if any(req.label != res.label for req, res in zip(request.reservations, reservations)):
+    if any(req.label != res.label for req, res in zip(reservation_requests, reservations)):
         raise ReservationError("solver must preserve reservation labels and order")
     if any(not isinstance(assignment, SlotRequest)
-           for req in request.reservations for assignment in req.slots):
+           for req in reservation_requests for assignment in req.slots):
         raise ReservationError("solver must return explicit SlotRequest assignments")
     if not reservations:
         return ()
 
+    request = ReserveRequest(tuple(reservation_requests))
     response, pending_fds = _send_reserve(socket_path, request, len(reservations))
     acquired = []
     try:

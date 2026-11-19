@@ -276,14 +276,14 @@ that capacity before releasing it; Reserved does not free GPU memory itself.
 
 ```python
 # Pin directly to a physical device
-with Reservation("infer", ExplicitSlot("cuda:2", ram_mb=8192)) as r:
+with Reservation("infer", DeviceConstraint(name="cuda:2", ram_mb=8192)) as r:
     model.to(r.devices[0].torch_device())
     run_model()
 ```
 
 ### Solve placement separately from acquisition
 
-SDK `ReservationSpec` records describe requirements; concrete `ReserveRequest`
+SDK `ReservationSpec` records describe requirements; concrete `ReservationRequest`
 records contain named device assignments. Given `capacity`, the `devices` list
 from a daemon status response, solving is pure:
 
@@ -314,7 +314,9 @@ else:
 Each policy attempts every specification and returns one complete candidate or
 `NoPlacement`; failure does not return a partial batch. Labels are carried as
 metadata, and inputs remain unchanged. These are greedy policies, not exhaustive
-searches. Their explicit assignments are passed through for daemon validation.
+searches. `DeviceConstraint(name="cuda:2", ...)` pins a requirement while still
+checking its type, model, and resource constraints. `ExplicitSlot(...)` remains
+a compatibility constructor for a named `DeviceConstraint`.
 
 Acquisition does no solving or status query. The daemon can reject a stale
 placement with `ReservationError`. Returned handles are already acquired and
@@ -322,7 +324,7 @@ release independently. For the combined workflow, use
 `Request(..., solver=solve_reservations_spread).acquire()`.
 
 Custom solvers are ordinary functions with signature
-`(capacity, reservation_specs) -> ReserveRequest | NoPlacement`. This replaces
+`(capacity, reservation_specs) -> list[ReservationRequest] | NoPlacement`. This replaces
 the previous `ConsolidateSolver`/`SpreadSolver` objects and their `.solve()`
 method. Choose the solver on `Request` for a batch; a member's explicitly chosen
 standalone solver must agree with that choice.
