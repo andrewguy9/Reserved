@@ -208,6 +208,15 @@ See [CUDA device indexing](ARCHITECTURE.md#cuda-device-indexing).
 
 ## Handle failures
 
+For applications that choose placement themselves, the SDK separates pure
+placement from acquiring leases. A solver takes capacity and `ReservationSpec`
+requirements, returning a concrete request or `NoPlacement`. Pass a concrete
+request to `acquire_reservations()`; it performs no solving. See the
+[placement and acquisition example](README.md#solve-placement-separately-from-acquisition).
+Both built-in policies currently require all specifications to be placed and
+return one candidate. To let the SDK obtain capacity and run a chosen function,
+use `Request(..., solver=solve_reservations_spread).acquire()`.
+
 | Observation | Application action |
 | --- | --- |
 | `DaemonNotRunningError`, or a CLI daemon-connection error with exit code 2 | Start or locate the daemon and check the socket setting. |

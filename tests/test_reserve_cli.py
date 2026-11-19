@@ -8,8 +8,8 @@ import pytest
 
 from reserved.bin.reserve import build_exec_env, build_reserve_request, main, parse_slot
 from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
-from reserved.sdk.client import DeviceConstraint, ExplicitSlot
-from reserved.sdk.solvers import ConsolidateSolver
+from reserved.sdk.client import DeviceConstraint, ExplicitSlot, ReservationSpec
+from reserved.sdk.solvers import NoPlacement, solve_reservations_consolidated
 
 
 def test_parse_slot_ram_and_compute_aliases_are_equivalent():
@@ -52,7 +52,7 @@ def test_build_reserve_request_for_explicit_slots_preserves_order_and_capacity()
         ExplicitSlot("cpu", ram_mb=1024),
     ]
 
-    req = build_reserve_request("job", slots, ConsolidateSolver())
+    req = build_reserve_request("job", slots, solve_reservations_consolidated)
 
     assert req.reservations == (
         ReservationRequest(label="job", slots=(
@@ -63,7 +63,7 @@ def test_build_reserve_request_for_explicit_slots_preserves_order_and_capacity()
 
 
 def test_build_reserve_request_without_slots_is_valid_marker_reservation():
-    req = build_reserve_request("marker", [], ConsolidateSolver())
+    req = build_reserve_request("marker", [], solve_reservations_consolidated)
 
     assert req.reservations == (
         ReservationRequest(label="marker", slots=()),
@@ -71,28 +71,36 @@ def test_build_reserve_request_without_slots_is_valid_marker_reservation():
 
 
 def test_build_reserve_request_delegates_constraints_to_solver():
-    class RecordingSolver:
-        def __init__(self):
-            self.calls = []
-
-        def solve(self, capacity, requirements):
-            self.calls.append((capacity, requirements))
-            return ((SlotRequest(capacity[0]["name"], requirements[0][0].ram_mb),),)
-
-    solver = RecordingSolver()
+    calls = []
+    def solver(capacity, specifications):
+        calls.append((capacity, specifications))
+        return ReserveRequest((ReservationRequest(specifications[0].label, (
+            SlotRequest(capacity[0]["name"], specifications[0].requirements[0].ram_mb),
+        )),))
     devices = [{"name": "cuda:0"}]
     slots = [DeviceConstraint("cuda", ram_mb=2048)]
 
     req = build_reserve_request("job", slots, solver, devices)
 
-    assert solver.calls == [(devices, [slots])]
+    assert calls == [(devices, [ReservationSpec("job", tuple(slots))])]
     assert req.reservations[0].label == "job"
     assert req.reservations[0].slots[0] == SlotRequest(name="cuda:0", ram_mb=2048)
 
 
 def test_build_reserve_request_requires_status_for_constraints():
     with pytest.raises(ValueError, match="device status"):
-        build_reserve_request("job", [DeviceConstraint("cuda")], ConsolidateSolver())
+        build_reserve_request("job", [DeviceConstraint("cuda")], solve_reservations_consolidated)
+
+
+@pytest.mark.parametrize("outcome", [
+    NoPlacement("no room"), ReserveRequest(()),
+    ReserveRequest((ReservationRequest("job", ()), ReservationRequest("extra", ()))),
+    ReserveRequest((ReservationRequest("wrong-label", ()),)), (),
+    ReserveRequest((ReservationRequest("job", (DeviceConstraint("cpu"),)),)),
+])
+def test_cli_rejects_no_placement_and_invalid_single_reservation_results(outcome):
+    with pytest.raises(ValueError):
+        build_reserve_request("job", [DeviceConstraint("cpu")], lambda *_: outcome, [])
 
 
 def test_build_exec_env_sets_reservation_metadata_without_mutating_base_env():

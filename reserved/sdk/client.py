@@ -2,10 +2,11 @@
 client.py — Python SDK client for the reserved daemon.
 
 Public API:
-  Reservation(label, *slots, solver=ConsolidateSolver(), socket_path=None)
+  Reservation(label, *slots, solver=None, socket_path=None)
   adopt_inherited_lease()
-  Request(*reservations, socket_path=None)
-  acquire_reservations(slot_groups, *, labels, socket_path=None)
+  Request(*reservations, solver=None, socket_path=None)
+  acquire_reservations(request: ReserveRequest, *, socket_path=None)
+  ReservationSpec(label, requirements)
   DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)
   ExplicitSlot(name, *, ram_mb=0, compute_units=0)
   GrantedDevice(device_name, cuda_ordinal)
@@ -35,7 +36,9 @@ from reserved.sdk.errors import (
     ReservationError,
     ReservationExpiredError,
 )
-from reserved.sdk.solvers import ConsolidateSolver
+from reserved.sdk.solvers import (
+    NoPlacement, ReservationSolver, solve_reservations_consolidated,
+)
 
 _inherited_lease_lock = threading.Lock()
 _inherited_lease_adopted = False
@@ -87,6 +90,14 @@ class ExplicitSlot:
         self.name = name
         self.ram_mb = ram_mb
         self.compute_units = compute_units
+
+
+@dataclass(frozen=True)
+class ReservationSpec:
+    """SDK placement input for one reservation; its label is carried unchanged."""
+
+    label: str
+    requirements: tuple[DeviceConstraint | ExplicitSlot, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +235,7 @@ def _send_reserve(
     Returns (response_dict, list_of_fds).
     """
     sock = _connect(socket_path)
+    received_fds: list[int] = []
     try:
         wire = protocol.reserve_request_to_wire(request)
         sock.sendall(wire)
@@ -231,7 +243,6 @@ def _send_reserve(
         # Receive response + SCM_RIGHTS fds.
         # We may need to call recvmsg multiple times if the response is large.
         buf = b""
-        received_fds: list[int] = []
 
         # First recvmsg — should arrive with the fds attached.
         chunk, fds = _recv_fds(sock, 65536, num_reservations)
@@ -248,6 +259,13 @@ def _send_reserve(
         line, _, _ = buf.partition(b"\n")
         resp = protocol.parse_response(line)
         return resp, received_fds
+    except BaseException:
+        for fd in received_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
     finally:
         sock.close()
 
@@ -278,12 +296,12 @@ class Reservation:
         self,
         label: str,
         *slots: DeviceConstraint | ExplicitSlot,
-        solver: ConsolidateSolver | None = None,
+        solver: ReservationSolver | None = None,
         socket_path: str | None = None,
     ) -> None:
         self.label = label
         self._slots = list(slots)
-        self._solver = solver if solver is not None else ConsolidateSolver()
+        self._solver = solver
         self._socket_path = socket_path
 
         # Physical grant metadata set after acquisition or adoption.
@@ -313,51 +331,7 @@ class Reservation:
 
     def _acquire_single(self) -> None:
         """Acquire this reservation by itself (not part of a multi-reservation Request)."""
-        from ..core import ReservationRequest, ReserveRequest, SlotRequest
-        socket_path = _get_socket_override(self._socket_path)
-
-        if self._all_explicit():
-            # Skip solver step.
-            slots = [
-                SlotRequest(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
-                for s in self._slots
-            ]
-            req = ReserveRequest(reservations=(
-                ReservationRequest(label=self.label, slots=tuple(slots)),
-            ))
-        else:
-            status = _query_status(socket_path)
-            try:
-                slot_groups = self._solver.solve(status["devices"], [self._slots])
-            except ValueError as exc:
-                raise ReservationError(str(exc)) from exc
-            req = ReserveRequest(reservations=(
-                ReservationRequest(label=self.label, slots=slot_groups[0]),
-            ))
-
-        resp, fds = _send_reserve(socket_path, req, num_reservations=1)
-        if not resp.get("ok"):
-            # Close any stray fds.
-            for fd in fds:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            raise ReservationError(resp.get("error", "reservation rejected"))
-
-        granted = resp["reservations"][0]
-        self.reservation_id = granted["reservation_id"]
-        self.devices = [
-            GrantedDevice(device_name=s["device_name"], cuda_ordinal=s["cuda_ordinal"])
-            for s in granted["slots"]
-        ]
-        if fds:
-            self._lease_sock = socket.socket(fileno=fds[0])
-        else:
-            self._lease_sock = None
-
-    def _all_explicit(self) -> bool:
-        return all(isinstance(s, ExplicitSlot) for s in self._slots)
+        Request(self, solver=self._solver, socket_path=self._socket_path).acquire()
 
     # ------------------------------------------------------------------
     # Public methods
@@ -503,123 +477,118 @@ def adopt_inherited_lease() -> Reservation:
 # ---------------------------------------------------------------------------
 
 class Request:
-    """
-    Atomically acquire multiple reservations in a single wire request.
+    """Solve and atomically acquire a batch, preserving its SDK handles.
 
-    All reservations are granted or none are. Each is independently releasable.
-
-    Usage:
-        checkpoint, lora = Request(
-            Reservation("checkpoint", DeviceConstraint("cuda", ram_mb=8192)),
-            Reservation("lora",       DeviceConstraint("cuda", ram_mb=2048)),
-        ).acquire()
+    Supply a solver function once on Request. A reservation's standalone solver,
+    if specified, must agree with that batch choice. The default is consolidated.
     """
 
     def __init__(
         self,
         *reservations: Reservation,
+        solver: ReservationSolver | None = None,
         socket_path: str | None = None,
     ) -> None:
         self._reservations = list(reservations)
+        self._solver = solver if solver is not None else solve_reservations_consolidated
         self._socket_path = socket_path
 
     def acquire(self) -> tuple[Reservation, ...]:
-        """
-        Send a single atomic reserve request for all reservations.
+        """Return the acquired handles in order, or raise ReservationError.
 
-        Returns a tuple of Reservation objects (in declaration order), each
-        populated with granted device info and holding its own lease fd.
-
-        Raises ReservationError if the daemon rejects.
-        Raises DaemonNotRunningError if the daemon is not running.
+        Placement uses a status snapshot; the daemon rechecks current capacity.
+        Each acquired reservation has its own independently releasable lease.
         """
         if not self._reservations:
             return ()
         if any(r._inherited for r in self._reservations):
             raise ReservationError("an inherited reservation cannot be acquired again")
+        if any(r._solver is not None and r._solver is not self._solver
+               for r in self._reservations):
+            raise ReservationError("choose the solver on Request; reservation solvers must agree")
 
         socket_path = _get_socket_override(self._socket_path)
-
-        # Determine if all slots are explicit (across all reservations).
-        all_explicit = all(
-            all(isinstance(s, ExplicitSlot) for s in r._slots)
-            for r in self._reservations
-        )
-
-        if all_explicit:
-            req = self._build_explicit_request()
-        else:
-            status = _query_status(socket_path)
-            slot_groups = self._solve(status["devices"])
-            req = ReserveRequest(reservations=tuple(
-                ReservationRequest(label=r.label, slots=slots)
-                for r, slots in zip(self._reservations, slot_groups, strict=True)
-            ))
-
-        num = len(self._reservations)
-        resp, fds = _send_reserve(socket_path, req, num_reservations=num)
-
-        if not resp.get("ok"):
-            for fd in fds:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            raise ReservationError(resp.get("error", "reservation rejected"))
-
-        granted_list = resp["reservations"]
-        result: list[Reservation] = []
-        for res, granted, fd in zip(self._reservations, granted_list, fds):
-            res.reservation_id = granted["reservation_id"]
-            res.devices = [
-                GrantedDevice(device_name=s["device_name"], cuda_ordinal=s["cuda_ordinal"])
-                for s in granted["slots"]
-            ]
-            res._lease_sock = socket.socket(fileno=fd)
-            result.append(res)
-
-        # If fewer fds than reservations (shouldn't happen but be safe):
-        for res in self._reservations[len(fds):]:
-            res._lease_sock = None
-
-        return tuple(result)
-
-    def _build_explicit_request(self) -> ReserveRequest:
-        from ..core import ReservationRequest, ReserveRequest, SlotRequest
-        res_reqs = []
-        for r in self._reservations:
-            slots = [
-                SlotRequest(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
-                for s in r._slots
-            ]
-            res_reqs.append(ReservationRequest(label=r.label, slots=tuple(slots)))
-        return ReserveRequest(reservations=tuple(res_reqs))
-
-    def _solve(self, devices: list[dict]) -> tuple[tuple[SlotRequest, ...], ...]:
-        # All reservations share the same solver (from the first one, or default).
-        solver = self._reservations[0]._solver if self._reservations else ConsolidateSolver()
-        try:
-            return solver.solve(devices, [r._slots for r in self._reservations])
-        except ValueError as exc:
-            raise ReservationError(str(exc)) from exc
+        capacity = _query_status(socket_path)["devices"]
+        reservation_specs = [
+            ReservationSpec(r.label, tuple(r._slots)) for r in self._reservations
+        ]
+        placement = self._solver(capacity, reservation_specs)
+        if isinstance(placement, NoPlacement):
+            raise ReservationError(placement.reason)
+        return _acquire_into(placement, self._reservations, socket_path)
 
 
 def acquire_reservations(
-    slot_groups: Sequence[Sequence[SlotRequest]],
+    request: ReserveRequest,
     *,
-    labels: Sequence[str],
     socket_path: str | None = None,
 ) -> tuple[Reservation, ...]:
-    """Atomically acquire one reservation per selected slot group.
+    """Acquire a concrete batch without querying status or running a solver.
 
-    Returns acquired reservations in group order; callers release them after
-    use. Supply one label per group. Stale slot selections can be rejected
-    with ReservationError.
+    The daemon grants all reservations or rejects the batch, including stale
+    placements. Results retain request order and have independent leases.
+    Call release() in a finally block after use.
     """
-    return Request(*(
-        Reservation(label, *(
-            ExplicitSlot(slot.name, ram_mb=slot.ram_mb, compute_units=slot.compute_units)
-            for slot in slots
-        ))
-        for label, slots in zip(labels, slot_groups, strict=True)
-    ), socket_path=socket_path).acquire()
+    if not isinstance(request, ReserveRequest):
+        raise TypeError("acquisition requires a concrete ReserveRequest")
+    reservations = []
+    for reservation_request in request.reservations:
+        assignments = []
+        for assignment in reservation_request.slots:
+            if not isinstance(assignment, SlotRequest):
+                raise TypeError("acquisition requires explicit SlotRequest assignments")
+            assignments.append(ExplicitSlot(
+                assignment.name, ram_mb=assignment.ram_mb,
+                compute_units=assignment.compute_units,
+            ))
+        reservations.append(Reservation(reservation_request.label, *assignments))
+    return _acquire_into(request, reservations, _get_socket_override(socket_path))
+
+
+def _acquire_into(
+    request: ReserveRequest,
+    reservations: Sequence[Reservation],
+    socket_path: str | None,
+) -> tuple[Reservation, ...]:
+    """Acquire explicit requests into SDK handles; own received fds until attached."""
+    if not isinstance(request, ReserveRequest):
+        raise ReservationError("solver must return ReserveRequest or NoPlacement")
+    if len(request.reservations) != len(reservations):
+        raise ReservationError("solver must return exactly one reservation per specification")
+    if any(req.label != res.label for req, res in zip(request.reservations, reservations)):
+        raise ReservationError("solver must preserve reservation labels and order")
+    if any(not isinstance(assignment, SlotRequest)
+           for req in request.reservations for assignment in req.slots):
+        raise ReservationError("solver must return explicit SlotRequest assignments")
+    if not reservations:
+        return ()
+
+    response, pending_fds = _send_reserve(socket_path, request, len(reservations))
+    acquired = []
+    try:
+        if not response.get("ok"):
+            raise ReservationError(response.get("error", "reservation rejected"))
+        grants = response["reservations"]
+        if len(grants) != len(reservations) or len(pending_fds) != len(reservations):
+            raise ReservationError("daemon returned an incomplete reservation batch")
+        for reservation, grant in zip(reservations, grants):
+            reservation_id = grant["reservation_id"]
+            devices = [GrantedDevice(s["device_name"], s["cuda_ordinal"])
+                       for s in grant["slots"]]
+            lease = socket.socket(fileno=pending_fds[0])
+            pending_fds.pop(0)  # Ownership moves from the raw fd list to this handle.
+            reservation.reservation_id = reservation_id
+            reservation.devices = devices
+            reservation._lease_sock = lease
+            acquired.append(reservation)
+        return tuple(acquired)
+    except BaseException:
+        for reservation in acquired:
+            reservation.release()
+        raise
+    finally:
+        for fd in pending_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass

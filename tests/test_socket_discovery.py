@@ -115,13 +115,15 @@ def test_sdk_acquires_and_releases_through_default_fallback(discovery, atomic):
     assert client._query_status(system)["devices"][0]["available_ram_mb"] == 1024
 
 
-def test_acquire_reservations_labels_and_releases_independently(discovery):
+def test_acquire_reservations_labels_and_releases_independently(discovery, monkeypatch):
     _, system = discovery
-    slot_groups = sdk.ConsolidateSolver().solve(client._query_status(system)["devices"], [
-        [sdk.DeviceConstraint("cpu", ram_mb=768)],
-        [sdk.DeviceConstraint("cpu", ram_mb=256)],
+    placement = sdk.solve_reservations_consolidated(client._query_status(system)["devices"], [
+        sdk.ReservationSpec("first", (sdk.DeviceConstraint("cpu", ram_mb=768),)),
+        sdk.ReservationSpec("second", (sdk.DeviceConstraint("cpu", ram_mb=256),)),
     ])
-    first, second = sdk.acquire_reservations(slot_groups, labels=["first", "second"])
+    with monkeypatch.context() as direct_acquisition:
+        direct_acquisition.setattr(client, "_query_status", lambda _: pytest.fail("queried status"))
+        first, second = sdk.acquire_reservations(placement)
     try:
         status = client._query_status(system)
         assert [r["label"] for r in status["reservations"]] == ["first", "second"]
@@ -134,12 +136,35 @@ def test_acquire_reservations_labels_and_releases_independently(discovery):
         second.check()
         assert client._query_status(system)["devices"][0]["available_ram_mb"] == 768
         with pytest.raises(sdk.ReservationError):
-            sdk.acquire_reservations(slot_groups, labels=["first", "second"], socket_path=system)
+            sdk.acquire_reservations(placement, socket_path=system)
         assert len(client._query_status(system)["reservations"]) == 1
         assert client._query_status(system)["devices"][0]["available_ram_mb"] == 768
     finally:
         first.release()
         second.release()
+
+
+@pytest.mark.parametrize("standalone", [False, True])
+def test_application_can_supply_a_plain_solver_function(discovery, standalone):
+    _, system = discovery
+    def custom_solver(capacity, specs):
+        assert capacity[0]["name"] == "cpu"
+        return sdk.ReserveRequest(tuple(
+            sdk.ReservationRequest(spec.label, (sdk.SlotRequest("cpu", 256),))
+            for spec in specs
+        ))
+    worker = sdk.Reservation("custom", sdk.DeviceConstraint("cpu"),
+                             solver=custom_solver if standalone else None)
+    try:
+        if standalone:
+            assert worker.__enter__() is worker
+        else:
+            assert sdk.Request(worker, solver=custom_solver).acquire() == (worker,)
+        worker.check()
+        assert worker.devices[0].device_name == "cpu"
+        assert client._query_status(system)["devices"][0]["available_ram_mb"] == 768
+    finally:
+        worker.release()
 
 
 def test_reserve_cli_uses_default_fallback(discovery):

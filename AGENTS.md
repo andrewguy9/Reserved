@@ -71,6 +71,9 @@ consequences explicit.
 - [ ] Keep computations small and dependencies explicit. Use comprehensions,
   loops, closures, or factories where they make the operation clearer.
   Avoid flags selecting unrelated operations and speculative abstractions.
+- [ ] For solver changes, distinguish SDK specifications, one concrete batch,
+  alternative batches, and acquired leases. State completeness and no-placement
+  behavior before choosing the signature; see `LEARNINGS.md` for review evidence.
 - [ ] Preserve caller-owned inputs where value transformations are promised.
   Check nested containers: a frozen dataclass does not freeze its dictionaries.
 - [ ] Preserve SDK signatures, CLI syntax, environment variables, wire formats,

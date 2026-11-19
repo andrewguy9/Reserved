@@ -18,12 +18,16 @@ from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import (
     DeviceConstraint,
     ExplicitSlot,
+    ReservationSpec,
     _get_socket_override,
     _query_status,
     _send_reserve,
 )
 from reserved.sdk.errors import DaemonNotRunningError
-from reserved.sdk.solvers import ConsolidateSolver, SpreadSolver
+from reserved.sdk.solvers import (
+    NoPlacement, ReservationSolver,
+    solve_reservations_consolidated, solve_reservations_spread,
+)
 
 
 _USAGE = f"""Acquire a reservation and exec a command under it.
@@ -84,7 +88,7 @@ def parse_slot(spec: str) -> DeviceConstraint | ExplicitSlot:
 def build_reserve_request(
     label: str,
     slots: list[DeviceConstraint | ExplicitSlot],
-    solver: ConsolidateSolver | SpreadSolver,
+    solver: ReservationSolver,
     devices: list[dict] | None = None,
 ) -> ReserveRequest:
     """Build the explicit daemon request for already-parsed CLI slots."""
@@ -102,10 +106,17 @@ def build_reserve_request(
 
     if devices is None:
         raise ValueError("device status is required for constraint slots")
-    slot_groups = solver.solve(devices, [slots])
-    return ReserveRequest(reservations=(
-        ReservationRequest(label=label, slots=slot_groups[0]),
-    ))
+    placement = solver(devices, [ReservationSpec(label, tuple(slots))])
+    if isinstance(placement, NoPlacement):
+        raise ValueError(placement.reason)
+    if not isinstance(placement, ReserveRequest) or len(placement.reservations) != 1:
+        raise ValueError("solver must return exactly one reservation for this command")
+    if placement.reservations[0].label != label:
+        raise ValueError("solver must preserve the reservation label")
+    if any(not isinstance(assignment, SlotRequest)
+           for assignment in placement.reservations[0].slots):
+        raise ValueError("solver must return explicit SlotRequest assignments")
+    return placement
 
 
 def build_exec_env(
@@ -165,7 +176,7 @@ def main(argv: list[str] | None = None) -> None:
         usage_error("--solver must be consolidate or spread")
 
     socket_path = _get_socket_override(args["--socket"])
-    solver = SpreadSolver() if solver_name == "spread" else ConsolidateSolver()
+    solver = solve_reservations_spread if solver_name == "spread" else solve_reservations_consolidated
 
     slots = [parse_slot(spec) for spec in args["SLOT"]]
     label = args["LABEL"]

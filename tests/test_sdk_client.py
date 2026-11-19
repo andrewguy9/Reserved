@@ -2,23 +2,97 @@
 Invariant-focused tests for SDK client helpers and lease semantics.
 """
 
+import array
 import socket
 import sys
 import types
 
 import pytest
 
-from reserved.core import SlotRequest
-from reserved.sdk.client import GrantedDevice, Reservation, _connect, acquire_reservations
+from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
+from reserved.sdk.client import (
+    DeviceConstraint, GrantedDevice, Request, Reservation, _connect, acquire_reservations,
+)
+from reserved.sdk.solvers import NoPlacement, solve_reservations_spread
 from reserved.sdk.errors import DaemonNotRunningError, ReservationError, ReservationExpiredError
 import reserved.sdk.client as client_module
 
 
-@pytest.mark.parametrize("labels", [[], ["one", "two"]])
-def test_acquire_reservations_rejects_label_count_mismatch_before_acquisition(monkeypatch, labels):
-    monkeypatch.setattr(client_module.Request, "acquire", lambda _: pytest.fail("acquired"))
-    with pytest.raises(ValueError):
-        acquire_reservations(((SlotRequest("cpu", 256),),), labels=labels)
+@pytest.mark.parametrize("outcome, message", [
+    (NoPlacement("no room"), "no room"),
+    (ReserveRequest(()), "exactly one reservation"),
+    (ReserveRequest((ReservationRequest("worker", ()), ReservationRequest("extra", ()))),
+     "exactly one reservation"),
+    (ReserveRequest((ReservationRequest("wrong", ()),)), "labels and order"),
+    (ReserveRequest((ReservationRequest("worker", (DeviceConstraint("cpu"),)),)),
+     "explicit SlotRequest"),
+    ((), "ReserveRequest or NoPlacement"),
+])
+@pytest.mark.parametrize("standalone", [False, True])
+def test_invalid_solver_outcomes_fail_before_acquisition(monkeypatch, outcome, message, standalone):
+    monkeypatch.setattr(client_module, "_query_status", lambda _: {"devices": []})
+    monkeypatch.setattr(client_module, "_send_reserve", lambda *_: pytest.fail("acquired"))
+    solver = lambda *_: outcome
+    worker = Reservation("worker", DeviceConstraint("cpu"), solver=solver if standalone else None)
+    with pytest.raises(ReservationError, match=message):
+        if standalone:
+            with worker:
+                pytest.fail("acquired")
+        else:
+            Request(worker, solver=solver).acquire()
+
+
+def test_batch_does_not_infer_a_solver_from_a_member(monkeypatch):
+    monkeypatch.setattr(client_module, "_query_status", lambda _: pytest.fail("queried"))
+    with pytest.raises(ReservationError, match="choose the solver on Request"):
+        Request(Reservation("custom", solver=solve_reservations_spread), Reservation("default")).acquire()
+
+
+def test_empty_acquisition_needs_no_daemon(monkeypatch):
+    monkeypatch.setattr(client_module, "_connect", lambda _: pytest.fail("connected"))
+    assert acquire_reservations(ReserveRequest(())) == ()
+    assert Request().acquire() == ()
+
+
+@pytest.mark.parametrize("concrete_input", [
+    NoPlacement("no room"),
+    ReserveRequest((ReservationRequest("worker", (DeviceConstraint("cpu"),)),)),
+])
+def test_acquisition_requires_concrete_input_before_connecting(monkeypatch, concrete_input):
+    monkeypatch.setattr(client_module, "_connect", lambda _: pytest.fail("connected"))
+    with pytest.raises(TypeError):
+        acquire_reservations(concrete_input)
+
+
+@pytest.mark.parametrize("failure", ["rejection", "missing-fd", "malformed-second-grant"])
+def test_failed_acquisition_closes_attached_and_unattached_lease_descriptors(monkeypatch, failure):
+    leases = [socket.socketpair(), socket.socketpair()]
+    descriptors = [lease.detach() for lease, _ in leases]
+    grants = [{"reservation_id": name, "slots": []} for name in ("first", "second")]
+    response = {"ok": True, "reservations": grants}
+    if failure == "rejection":
+        response = {"ok": False, "error": "rejected"}
+    elif failure == "missing-fd":
+        socket.close(descriptors.pop())
+    else:
+        grants[1] = {"slots": []}
+    monkeypatch.setattr(client_module, "_send_reserve", lambda *_: (response, descriptors))
+    try:
+        with pytest.raises((ReservationError, KeyError)):
+            acquire_reservations(ReserveRequest((
+                ReservationRequest("first", ()), ReservationRequest("second", ()),
+            )))
+        for _, peer in leases:
+            peer.settimeout(1)
+            assert peer.recv(1) == b""
+    finally:
+        for fd in descriptors:
+            try:
+                socket.close(fd)
+            except OSError:
+                pass
+        for _, peer in leases:
+            peer.close()
 
 
 def test_connect_translates_missing_socket_to_domain_error(monkeypatch):
@@ -33,6 +107,26 @@ def test_connect_translates_missing_socket_to_domain_error(monkeypatch):
 
     with pytest.raises(DaemonNotRunningError, match="not found"):
         _connect("/missing.sock")
+
+
+def test_malformed_wire_response_closes_received_lease_descriptor(monkeypatch):
+    transport, server = socket.socketpair()
+    lease, peer = socket.socketpair()
+    monkeypatch.setattr(client_module, "_connect", lambda _: transport)
+    try:
+        server.sendmsg([b"not-json\n"], [
+            (socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [lease.fileno()])),
+        ])
+        lease.close()  # Only the descriptor queued in the message holds this end open.
+        with pytest.raises(ValueError, match="invalid JSON response"):
+            client_module._send_reserve(None, ReserveRequest((ReservationRequest("job", ()),)), 1)
+        peer.settimeout(1)
+        assert peer.recv(1) == b""
+    finally:
+        transport.close()
+        server.close()
+        lease.close()
+        peer.close()
 
 
 def test_cpu_and_metal_pytorch_devices_ignore_cuda_visibility(monkeypatch):

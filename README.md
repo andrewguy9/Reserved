@@ -281,21 +281,51 @@ with Reservation("infer", ExplicitSlot("cuda:2", ram_mb=8192)) as r:
     run_model()
 ```
 
-### Acquire reservations from selected slots
+### Solve placement separately from acquisition
 
-Solvers take a capacity snapshot and plain groups of requirements. They return
-slot assignments in the same group order, with no labels or IO:
+SDK `ReservationSpec` records describe requirements; concrete `ReserveRequest`
+records contain named device assignments. Given `capacity`, the `devices` list
+from a daemon status response, solving is pure:
 
 ```python
-from reserved.sdk import SpreadSolver, acquire_reservations
+from reserved.sdk import (
+    DeviceConstraint, NoPlacement, ReservationSpec, acquire_reservations,
+    solve_reservations_spread,
+)
 
-slot_groups = SpreadSolver().solve(capacity, requirements)
-reservations = acquire_reservations(slot_groups, labels=["worker-0", "worker-1"])
+specifications = [
+    ReservationSpec("worker-0", (DeviceConstraint("cpu", ram_mb=256),)),
+    ReservationSpec("worker-1", (DeviceConstraint("cpu", ram_mb=256),)),
+]
+placement = solve_reservations_spread(capacity, specifications)
+if isinstance(placement, NoPlacement):
+    print(placement.reason)  # The application decides whether to retry.
+else:
+    reservations = acquire_reservations(placement)
+    try:
+        for reservation in reservations:
+            reservation.check()
+            # Start and supervise the worker while retaining this handle.
+    finally:
+        for reservation in reservations:
+            reservation.release()
 ```
 
-Supply one label per slot group. The returned reservations are already
-acquired; keep them while resources are in use, then call `release()` in a
-`finally` block. The daemon can reject stale slot selections with `ReservationError`.
+Each policy attempts every specification and returns one complete candidate or
+`NoPlacement`; failure does not return a partial batch. Labels are carried as
+metadata, and inputs remain unchanged. These are greedy policies, not exhaustive
+searches. Their explicit assignments are passed through for daemon validation.
+
+Acquisition does no solving or status query. The daemon can reject a stale
+placement with `ReservationError`. Returned handles are already acquired and
+release independently. For the combined workflow, use
+`Request(..., solver=solve_reservations_spread).acquire()`.
+
+Custom solvers are ordinary functions with signature
+`(capacity, reservation_specs) -> ReserveRequest | NoPlacement`. This replaces
+the previous `ConsolidateSolver`/`SpreadSolver` objects and their `.solve()`
+method. Choose the solver on `Request` for a batch; a member's explicitly chosen
+standalone solver must agree with that choice.
 
 ### Adopt a lease from `reserve`
 
