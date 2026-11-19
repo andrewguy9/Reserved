@@ -18,7 +18,7 @@ from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import (
     DeviceConstraint,
     ExplicitSlot,
-    _get_socket_path,
+    _get_socket_override,
     _query_status,
     _send_reserve,
 )
@@ -161,7 +161,7 @@ def main(argv: list[str] | None = None) -> None:
     if solver_name not in {"consolidate", "spread"}:
         usage_error("--solver must be consolidate or spread")
 
-    socket_path = _get_socket_path(args["--socket"])
+    socket_path = _get_socket_override(args["--socket"])
     solver = SpreadSolver() if solver_name == "spread" else ConsolidateSolver()
 
     slots = [parse_slot(spec) for spec in args["SLOT"]]

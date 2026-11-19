@@ -27,7 +27,7 @@ from reserved.core import (
     ReserveRequest,
     SlotRequest,
 )
-from reserved.paths import resolve_socket_path as _get_socket_path
+from reserved.paths import client_socket_override as _get_socket_override, client_socket_paths
 from reserved.sdk.errors import (
     DaemonNotRunningError,
     InheritedLeaseAlreadyAdoptedError,
@@ -175,23 +175,29 @@ def _recv_fds(sock: socket.socket, bufsize: int, maxfds: int) -> tuple[bytes, li
 # Low-level transport
 # ---------------------------------------------------------------------------
 
-def _connect(socket_path: str) -> socket.socket:
-    """Open a transport connection to the daemon."""
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.connect(socket_path)
-    except FileNotFoundError as exc:
-        raise DaemonNotRunningError(
-            f"daemon socket not found: {socket_path!r}"
-        ) from exc
-    except ConnectionRefusedError as exc:
-        raise DaemonNotRunningError(
-            f"daemon not running (connection refused): {socket_path!r}"
-        ) from exc
-    return sock
+def _connect(socket_path: str | None) -> socket.socket:
+    """Connect to an explicit target or the first available default socket."""
+    errors: list[str] = []
+    last_error: OSError | None = None
+    for path in client_socket_paths(socket_path):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(path)
+        except OSError as exc:
+            sock.close()
+            if isinstance(exc, FileNotFoundError):
+                errors.append(f"daemon socket not found: {path!r}")
+            elif isinstance(exc, ConnectionRefusedError):
+                errors.append(f"daemon not running (connection refused): {path!r}")
+            else:
+                raise
+            last_error = exc
+        else:
+            return sock
+    raise DaemonNotRunningError("; ".join(errors)) from last_error
 
 
-def _query_status(socket_path: str) -> dict:
+def _query_status(socket_path: str | None) -> dict:
     """Send a status request and return the parsed response dict."""
     sock = _connect(socket_path)
     try:
@@ -210,7 +216,7 @@ def _query_status(socket_path: str) -> dict:
 
 
 def _send_reserve(
-    socket_path: str,
+    socket_path: str | None,
     request: ReserveRequest,
     num_reservations: int,
 ) -> tuple[dict, list[int]]:
@@ -310,7 +316,7 @@ class Reservation:
     def _acquire_single(self) -> None:
         """Acquire this reservation by itself (not part of a multi-reservation Request)."""
         from ..core import ReservationRequest, ReserveRequest, SlotRequest
-        socket_path = _get_socket_path(self._socket_path)
+        socket_path = _get_socket_override(self._socket_path)
 
         if self._all_explicit():
             # Skip solver step.
@@ -534,7 +540,7 @@ class Request:
         if any(r._inherited for r in self._reservations):
             raise ReservationError("an inherited reservation cannot be acquired again")
 
-        socket_path = _get_socket_path(self._socket_path)
+        socket_path = _get_socket_override(self._socket_path)
 
         # Determine if all slots are explicit (across all reservations).
         all_explicit = all(

@@ -133,7 +133,9 @@ reserved
 
 The daemon runs in the foreground. On Linux it uses
 `$XDG_RUNTIME_DIR/reserved.sock` when available; on macOS its fallback is
-`/tmp/reserved-<uid>.sock`. Clients use the same discovery rules. On Linux
+`/tmp/reserved-<uid>.sock`. Clients try the runtime socket first, then the platform
+default if it is missing or refuses connections. Explicit `--socket` and
+`RESERVED_SOCKET` settings disable fallback. On Linux
 without `XDG_RUNTIME_DIR`, choose a writable path explicitly with
 `export RESERVED_SOCKET="/tmp/reserved-$(id -u)-test.sock"` in both shells, or use the
 [system service](INSTALL.md#linux-system-service).
