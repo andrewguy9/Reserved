@@ -18,7 +18,7 @@ from .errors import (
     ReservationError,
     ReservationExpiredError,
 )
-from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
+from reserved.core import ReservationRequest, ReserveRequest, DeviceAllocation
 from .solvers import (
     NoPlacement,
     ReservationSolver,
@@ -37,7 +37,7 @@ __all__ = [
     "ReservationSpec",
     "ReservationRequest",
     "ReserveRequest",
-    "SlotRequest",
+    "DeviceAllocation",
     "NoPlacement",
     "ReservationSolver",
     "solve_reservations_consolidated",

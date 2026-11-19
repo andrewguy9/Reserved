@@ -10,7 +10,7 @@ from reserved.sdk.client import DeviceConstraint, ExplicitSlot, ReservationSpec
 from reserved.sdk.solvers import (
     NoPlacement, solve_reservations_consolidated, solve_reservations_spread,
 )
-from reserved.core import ReservationRequest, SlotRequest
+from reserved.core import ReservationRequest, DeviceAllocation
 
 
 DEVICES = [
@@ -68,7 +68,7 @@ POLICIES = [solve_reservations_consolidated, solve_reservations_spread]
 def test_policy_selects_expected_device(solver, requirement, device_name):
     placement = solver(DEVICES, [ReservationSpec("worker", (requirement,))])
     assert placement == [ReservationRequest("worker", (
-        SlotRequest(device_name, requirement.ram_mb, requirement.compute_units),
+        DeviceAllocation(device_name, requirement.ram_mb, requirement.compute_units),
     ))]
 
 
@@ -79,7 +79,7 @@ def test_explicit_assignments_keep_names_and_amounts(solver):
         ExplicitSlot("cuda:2", ram_mb=4096),
     ))])
     assert placement == [ReservationRequest("pinned", (
-        SlotRequest("cuda:1", 2048, 25), SlotRequest("cuda:2", 4096),
+        DeviceAllocation("cuda:1", 2048, 25), DeviceAllocation("cuda:2", 4096),
     ))]
 
 
@@ -129,7 +129,7 @@ def test_multiple_devices_within_one_reservation(solver):
         DeviceConstraint("cuda", ram_mb=6000),
         DeviceConstraint("cuda", ram_mb=6000),
     ))]) == [ReservationRequest("distributed", (
-        SlotRequest("cuda:0", 6000), SlotRequest("cuda:1", 6000),
+        DeviceAllocation("cuda:0", 6000), DeviceAllocation("cuda:1", 6000),
     ))]
 
 
@@ -147,8 +147,8 @@ def test_results_preserve_labels_order_and_inputs_on_success_and_failure(solver)
              ReservationSpec("marker", ())]
     original = deepcopy((capacity, specs))
     expected = [
-        ReservationRequest("first", (SlotRequest("cpu", 1024),)),
-        ReservationRequest("second", (SlotRequest("cpu", 1024),)),
+        ReservationRequest("first", (DeviceAllocation("cpu", 1024),)),
+        ReservationRequest("second", (DeviceAllocation("cpu", 1024),)),
         ReservationRequest("marker", ()),
     ]
     assert solver(capacity, specs) == expected

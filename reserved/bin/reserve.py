@@ -13,7 +13,7 @@ if _here not in sys.path:
     sys.path.insert(0, _here)
 
 from reserved.cli import parse_options, usage_error
-from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
+from reserved.core import ReservationRequest, ReserveRequest, DeviceAllocation
 from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import (
     DeviceConstraint,
@@ -96,9 +96,9 @@ def build_reserve_request(
             raise ValueError("solver must return exactly one reservation for this command")
     if reservation_request.label != label:
         raise ValueError("solver must preserve the reservation label")
-    if any(not isinstance(assignment, SlotRequest)
+    if any(not isinstance(assignment, DeviceAllocation)
            for assignment in reservation_request.slots):
-        raise ValueError("solver must return explicit SlotRequest assignments")
+        raise ValueError("solver must return explicit DeviceAllocation assignments")
     return ReserveRequest((reservation_request,))
 
 

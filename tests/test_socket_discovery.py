@@ -150,7 +150,7 @@ def test_application_can_supply_a_plain_solver_function(discovery, worker_count)
     def custom_solver(capacity, specs):
         assert capacity[0]["name"] == "cpu"
         return [
-            sdk.ReservationRequest(spec.label, (sdk.SlotRequest("cpu", 256),))
+            sdk.ReservationRequest(spec.label, (sdk.DeviceAllocation("cpu", 256),))
             for spec in specs
         ]
     workers = [sdk.Reservation(f"custom-{index}", sdk.DeviceConstraint("cpu"))

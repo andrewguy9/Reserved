@@ -9,7 +9,7 @@ import types
 
 import pytest
 
-from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
+from reserved.core import ReservationRequest, ReserveRequest, DeviceAllocation
 from reserved.sdk.client import (
     DeviceConstraint, GrantedDevice, Request, Reservation, _connect, acquire_reservations,
 )
@@ -25,7 +25,7 @@ import reserved.sdk.client as client_module
      "exactly one reservation"),
     ([ReservationRequest("wrong", ())], "labels and order"),
     ([ReservationRequest("worker", (DeviceConstraint("cpu"),))],
-     "explicit SlotRequest"),
+     "explicit DeviceAllocation"),
     (object(), "reservation requests or NoPlacement"),
 ])
 @pytest.mark.parametrize("standalone", [False, True])

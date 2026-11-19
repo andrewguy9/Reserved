@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Sequence
 
-from ..core import ReservationRequest, SlotRequest
+from ..core import ReservationRequest, DeviceAllocation
 
 if TYPE_CHECKING:
     from .client import DeviceConstraint, ReservationSpec
@@ -65,7 +65,7 @@ def _place_reservations(
             selected_device = min(candidates, key=rank_device)
             device_name = selected_device["name"]
 
-            assignments.append(SlotRequest(
+            assignments.append(DeviceAllocation(
                 device_name, requirement.ram_mb, requirement.compute_units,
             ))
             selected_device["available_ram_mb"] -= requirement.ram_mb

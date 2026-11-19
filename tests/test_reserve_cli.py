@@ -7,7 +7,7 @@ import json
 import pytest
 
 from reserved.bin.reserve import build_exec_env, build_reserve_request, main, parse_slot
-from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
+from reserved.core import ReservationRequest, ReserveRequest, DeviceAllocation
 from reserved.sdk.client import DeviceConstraint, ExplicitSlot, ReservationSpec
 from reserved.sdk.solvers import NoPlacement, solve_reservations_consolidated
 
@@ -63,8 +63,8 @@ def test_build_reserve_request_for_explicit_slots_preserves_order_and_capacity()
 
     assert req.reservations == (
         ReservationRequest(label="job", slots=(
-            SlotRequest(name="cuda:1", ram_mb=4096, compute_units=25),
-            SlotRequest(name="cpu", ram_mb=1024, compute_units=0),
+            DeviceAllocation(name="cuda:1", ram_mb=4096, compute_units=25),
+            DeviceAllocation(name="cpu", ram_mb=1024, compute_units=0),
         )),
     )
 
@@ -82,7 +82,7 @@ def test_build_reserve_request_delegates_constraints_to_solver():
     def solver(capacity, specifications):
         calls.append((capacity, specifications))
         return [ReservationRequest(specifications[0].label, (
-            SlotRequest(capacity[0]["name"], specifications[0].requirements[0].ram_mb),
+            DeviceAllocation(capacity[0]["name"], specifications[0].requirements[0].ram_mb),
         ))]
     devices = [{"name": "cuda:0"}]
     slots = [DeviceConstraint("cuda", ram_mb=2048)]
@@ -91,7 +91,7 @@ def test_build_reserve_request_delegates_constraints_to_solver():
 
     assert calls == [(devices, [ReservationSpec("job", tuple(slots))])]
     assert req.reservations[0].label == "job"
-    assert req.reservations[0].slots[0] == SlotRequest(name="cuda:0", ram_mb=2048)
+    assert req.reservations[0].slots[0] == DeviceAllocation(name="cuda:0", ram_mb=2048)
 
 
 def test_build_reserve_request_requires_status_for_constraints():

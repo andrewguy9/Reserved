@@ -27,7 +27,7 @@ from reserved import protocol
 from reserved.core import (
     ReservationRequest,
     ReserveRequest,
-    SlotRequest,
+    DeviceAllocation,
 )
 from reserved.paths import client_socket_override as _get_socket_override, client_socket_paths
 from reserved.sdk.errors import (
@@ -528,8 +528,8 @@ def acquire_reservations(
     for reservation_request in reservation_requests:
         assignments = []
         for assignment in reservation_request.slots:
-            if not isinstance(assignment, SlotRequest):
-                raise TypeError("acquisition requires explicit SlotRequest assignments")
+            if not isinstance(assignment, DeviceAllocation):
+                raise TypeError("acquisition requires explicit DeviceAllocation assignments")
             assignments.append(DeviceConstraint(
                 name=assignment.name, ram_mb=assignment.ram_mb,
                 compute_units=assignment.compute_units,
@@ -554,9 +554,9 @@ def _acquire_into(
         raise ReservationError("solver must return exactly one reservation per specification")
     if any(req.label != res.label for req, res in zip(reservation_requests, reservations)):
         raise ReservationError("solver must preserve reservation labels and order")
-    if any(not isinstance(assignment, SlotRequest)
+    if any(not isinstance(assignment, DeviceAllocation)
            for req in reservation_requests for assignment in req.slots):
-        raise ReservationError("solver must return explicit SlotRequest assignments")
+        raise ReservationError("solver must return explicit DeviceAllocation assignments")
     if not reservations:
         return ()
 
