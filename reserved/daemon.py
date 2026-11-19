@@ -23,6 +23,7 @@ import socket
 import sys
 import threading
 import time
+from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
@@ -133,9 +134,9 @@ class _StatusHandler(BaseHTTPRequestHandler):
         for d in result.devices:
             rows_devices += (
                 f"<tr>"
-                f"<td>{d.name}</td>"
-                f"<td>{d.type}</td>"
-                f"<td>{d.model or ''}</td>"
+                f"<td>{escape(d.name)}</td>"
+                f"<td>{escape(d.type)}</td>"
+                f"<td>{escape(d.model or '')}</td>"
                 f"<td>{d.available_ram_mb}/{d.ram_mb} MB</td>"
                 f"<td>{d.available_compute_units}/{d.compute_units}</td>"
                 f"</tr>\n"
@@ -145,19 +146,19 @@ class _StatusHandler(BaseHTTPRequestHandler):
         for r in result.reservations:
             age = int(now - r.created_at)
             age_str = f"{age // 60}m{age % 60}s"
-            slot_rows = "".join(
-                f"<tr><td></td><td>{s.device_name}</td>"
-                f"<td>{s.ram_mb} MB</td><td>{s.compute_units}</td></tr>\n"
+            slot_cells = [
+                f"<td>{escape(s.device_name)}</td>"
+                f"<td>{s.ram_mb} MB</td><td>{s.compute_units}</td>"
                 for s in r.slots
-            )
-            rows_reservations += (
+            ] or ["<td>—</td><td>—</td><td>—</td>"]
+            rows_reservations += "".join(
                 f"<tr>"
-                f"<td>{r.id}</td>"
-                f"<td>{r.label}</td>"
+                f"<td>{escape(r.id)}</td>"
+                f"<td>{escape(r.label)}</td>"
                 f"<td>{age_str}</td>"
-                f"<td></td><td></td>"
+                f"{cells}"
                 f"</tr>\n"
-                + slot_rows
+                for cells in slot_cells
             )
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -178,8 +179,8 @@ h2{{margin-top:1.5em}}
 </table>
 <h2>Reservations</h2>
 <table>
-<tr><th>ID</th><th>Label</th><th>Age</th><th>Device</th><th>RAM</th></tr>
-{rows_reservations if rows_reservations else '<tr><td colspan="5">(none)</td></tr>'}
+<tr><th>ID</th><th>Label</th><th>Age</th><th>Device</th><th>RAM</th><th>Compute</th></tr>
+{rows_reservations if rows_reservations else '<tr><td colspan="6">(none)</td></tr>'}
 </table>
 </body></html>
 """

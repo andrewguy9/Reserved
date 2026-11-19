@@ -318,5 +318,5 @@ def recommend_workers(
     Acquisitions can still lose a race; keep surviving workers and replan.
     """
     return plan_workers(
-        backlogs, workers, client._query_status(client._get_socket_path(socket_path))
+        backlogs, workers, client._query_status(client._get_socket_override(socket_path))
     )

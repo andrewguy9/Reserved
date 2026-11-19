@@ -18,6 +18,9 @@ def test_connect_translates_missing_socket_to_domain_error(monkeypatch):
         def connect(self, socket_path):
             raise FileNotFoundError(socket_path)
 
+        def close(self):
+            pass
+
     monkeypatch.setattr(client_module.socket, "socket", lambda *args: MissingSocket())
 
     with pytest.raises(DaemonNotRunningError, match="not found"):
