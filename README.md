@@ -326,8 +326,8 @@ release independently. For the combined workflow, use
 Custom solvers are ordinary functions with signature
 `(capacity, reservation_specs) -> list[ReservationRequest] | NoPlacement`. This replaces
 the previous `ConsolidateSolver`/`SpreadSolver` objects and their `.solve()`
-method. Choose the solver on `Request` for a batch; a member's explicitly chosen
-standalone solver must agree with that choice.
+method. Choose the solver on `Request`, including for a batch containing just
+one reservation; the former `Reservation(..., solver=...)` argument is removed.
 
 ### Adopt a lease from `reserve`
 

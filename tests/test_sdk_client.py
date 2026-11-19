@@ -13,7 +13,7 @@ from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
 from reserved.sdk.client import (
     DeviceConstraint, GrantedDevice, Request, Reservation, _connect, acquire_reservations,
 )
-from reserved.sdk.solvers import NoPlacement, solve_reservations_spread
+from reserved.sdk.solvers import NoPlacement
 from reserved.sdk.errors import DaemonNotRunningError, ReservationError, ReservationExpiredError
 import reserved.sdk.client as client_module
 
@@ -33,19 +33,15 @@ def test_invalid_solver_outcomes_fail_before_acquisition(monkeypatch, outcome, m
     monkeypatch.setattr(client_module, "_query_status", lambda _: {"devices": []})
     monkeypatch.setattr(client_module, "_send_reserve", lambda *_: pytest.fail("acquired"))
     solver = lambda *_: outcome
-    worker = Reservation("worker", DeviceConstraint("cpu"), solver=solver if standalone else None)
+    worker = Reservation("worker", DeviceConstraint("cpu"))
+    if standalone:
+        monkeypatch.setattr(client_module, "solve_reservations_consolidated", solver)
     with pytest.raises(ReservationError, match=message):
         if standalone:
             with worker:
                 pytest.fail("acquired")
         else:
             Request(worker, solver=solver).acquire()
-
-
-def test_batch_does_not_infer_a_solver_from_a_member(monkeypatch):
-    monkeypatch.setattr(client_module, "_query_status", lambda _: pytest.fail("queried"))
-    with pytest.raises(ReservationError, match="choose the solver on Request"):
-        Request(Reservation("custom", solver=solve_reservations_spread), Reservation("default")).acquire()
 
 
 def test_empty_acquisition_needs_no_daemon(monkeypatch):

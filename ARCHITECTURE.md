@@ -48,8 +48,8 @@ There is no IO or input mutation in solving.
 querying status or invoking a solver. `Request(..., solver=...)` is the convenience
 workflow that obtains status, calls the chosen function, checks the returned
 reservation count and order, and acquires the batch. It chooses one solver for
-the batch; conflicting standalone solver choices on member reservations are
-rejected. Named requirements use the same constraint matching as other inputs;
+the batch, including batches of one. Individual reservations contain no solver
+policy. Named requirements use the same constraint matching as other inputs;
 callers with concrete requests can acquire them directly.
 
 ### Constraint solvers

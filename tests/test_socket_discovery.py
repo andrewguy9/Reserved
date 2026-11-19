@@ -144,8 +144,8 @@ def test_acquire_reservations_labels_and_releases_independently(discovery, monke
         second.release()
 
 
-@pytest.mark.parametrize("standalone", [False, True])
-def test_application_can_supply_a_plain_solver_function(discovery, standalone):
+@pytest.mark.parametrize("worker_count", [1, 2])
+def test_application_can_supply_a_plain_solver_function(discovery, worker_count):
     _, system = discovery
     def custom_solver(capacity, specs):
         assert capacity[0]["name"] == "cpu"
@@ -153,18 +153,17 @@ def test_application_can_supply_a_plain_solver_function(discovery, standalone):
             sdk.ReservationRequest(spec.label, (sdk.SlotRequest("cpu", 256),))
             for spec in specs
         ]
-    worker = sdk.Reservation("custom", sdk.DeviceConstraint("cpu"),
-                             solver=custom_solver if standalone else None)
+    workers = [sdk.Reservation(f"custom-{index}", sdk.DeviceConstraint("cpu"))
+               for index in range(worker_count)]
     try:
-        if standalone:
-            assert worker.__enter__() is worker
-        else:
-            assert sdk.Request(worker, solver=custom_solver).acquire() == (worker,)
-        worker.check()
-        assert worker.devices[0].device_name == "cpu"
-        assert client._query_status(system)["devices"][0]["available_ram_mb"] == 768
+        assert sdk.Request(*workers, solver=custom_solver).acquire() == tuple(workers)
+        for worker in workers:
+            worker.check()
+            assert worker.devices[0].device_name == "cpu"
+        assert client._query_status(system)["devices"][0]["available_ram_mb"] == 1024 - 256 * worker_count
     finally:
-        worker.release()
+        for worker in workers:
+            worker.release()
 
 
 def test_reserve_cli_uses_default_fallback(discovery):

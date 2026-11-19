@@ -2,12 +2,12 @@
 client.py — Python SDK client for the reserved daemon.
 
 Public API:
-  Reservation(label, *slots, solver=None, socket_path=None)
+  Reservation(label, *slots, socket_path=None)
   adopt_inherited_lease()
   Request(*reservations, solver=None, socket_path=None)
   acquire_reservations(reservation_requests, *, socket_path=None)
   ReservationSpec(label, requirements)
-  DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)
+  DeviceConstraint(type, *, name=None, model=None, ram_mb=0, compute_units=0)
   ExplicitSlot(name, *, ram_mb=0, compute_units=0)
   GrantedDevice(device_name, cuda_ordinal)
 """
@@ -291,12 +291,10 @@ class Reservation:
         self,
         label: str,
         *slots: DeviceConstraint,
-        solver: ReservationSolver | None = None,
         socket_path: str | None = None,
     ) -> None:
         self.label = label
         self._slots = list(slots)
-        self._solver = solver
         self._socket_path = socket_path
 
         # Physical grant metadata set after acquisition or adoption.
@@ -326,7 +324,7 @@ class Reservation:
 
     def _acquire_single(self) -> None:
         """Acquire this reservation by itself (not part of a multi-reservation Request)."""
-        Request(self, solver=self._solver, socket_path=self._socket_path).acquire()
+        Request(self, socket_path=self._socket_path).acquire()
 
     # ------------------------------------------------------------------
     # Public methods
@@ -474,8 +472,8 @@ def adopt_inherited_lease() -> Reservation:
 class Request:
     """Solve and atomically acquire a batch, preserving its SDK handles.
 
-    Supply a solver function once on Request. A reservation's standalone solver,
-    if specified, must agree with that batch choice. The default is consolidated.
+    Supply a solver function once on Request, including for a single reservation.
+    The default is consolidated; member reservations contain no solver policy.
     """
 
     def __init__(
@@ -498,10 +496,6 @@ class Request:
             return ()
         if any(r._inherited for r in self._reservations):
             raise ReservationError("an inherited reservation cannot be acquired again")
-        if any(r._solver is not None and r._solver is not self._solver
-               for r in self._reservations):
-            raise ReservationError("choose the solver on Request; reservation solvers must agree")
-
         socket_path = _get_socket_override(self._socket_path)
         capacity = _query_status(socket_path)["devices"]
         reservation_specs = [
