@@ -251,12 +251,27 @@ login or coordination between macOS users requires a separate deployment.
 
 ## Socket and config discovery
 
-All clients and the standalone daemon use the same socket precedence:
+Clients try socket sources in this order:
 
 1. Explicit `--socket PATH` (CLIs) or `socket_path=PATH` (SDK).
 2. Nonempty `RESERVED_SOCKET`.
 3. `$XDG_RUNTIME_DIR/reserved.sock`, when the variable is nonempty.
 4. `/tmp/reserved-<uid>.sock` on macOS; `/var/run/reserved.sock` on Linux.
+
+Explicit paths and `RESERVED_SOCKET` are strict overrides: a failed connection
+does not select another daemon. Without an override, clients try the runtime
+socket, then the platform default if the runtime socket is missing or refuses
+connections. Permission errors and failures after connecting do not trigger
+fallback. If both defaults fail, the error lists both paths.
+
+For example, with `XDG_RUNTIME_DIR=/run/user/1000`, `reserve-status` reaches
+the system service at `/var/run/reserved.sock` when no user daemon is listening
+at `/run/user/1000/reserved.sock`. `reserve` and SDK calls use the same behavior.
+Use `reserve-status --socket /var/run/reserved.sock` to select the system daemon
+explicitly, even when a user daemon is running.
+
+The standalone daemon binds the first path in this order without probing other
+defaults; client fallback does not change where it listens.
 
 A systemd-activated daemon uses the listener supplied by systemd; its address
 and permissions come from the socket unit, not `--socket` or environment values.

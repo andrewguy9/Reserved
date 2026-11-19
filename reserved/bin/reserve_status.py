@@ -15,7 +15,7 @@ if _here not in sys.path:
 
 from reserved.cli import parse_options
 from reserved.paths import SOCKET_PATH_HELP
-from reserved.sdk.client import _get_socket_path, _query_status
+from reserved.sdk.client import _get_socket_override, _query_status
 from reserved.sdk.errors import DaemonNotRunningError
 
 
@@ -62,7 +62,7 @@ def _format_human(status: dict) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_options(_USAGE, argv)
-    socket_path = _get_socket_path(args["--socket"])
+    socket_path = _get_socket_override(args["--socket"])
 
     try:
         status = _query_status(socket_path)
