@@ -8,3 +8,5 @@ build/
 .venv/
 .coverage
 htmlcov/
+.pytest_cache/
+env/
