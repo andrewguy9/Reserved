@@ -325,10 +325,12 @@ torch reports with the same GPU UUID, so the mapping is correct whether
 scheduler. For example, with `CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781,GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782`,
 a grant of `cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` becomes logical `cuda:1`.
 
-Resolving a CUDA grant initializes CUDA in the calling process, so call
-`torch_devices()` in the process that will use the GPU. A grant that torch
-cannot see, and a torch build that does not report device UUIDs, raise
-`ReservationError`.
+`torch_devices()` expects PyTorch to be installed in the calling process; the
+package does not declare or install it. Acquiring, checking, and releasing
+reservations never import torch. Resolving a CUDA grant initializes CUDA in the
+calling process, so call `torch_devices()` in the process that will use the
+GPU. A grant that torch cannot see, and a torch build that does not report
+device UUIDs, raise `ReservationError`.
 
 For PyTorch device selection, use `cpu` or a `cpu:` name for CPU grants and
 `metal:0` for Metal grants. Unsupported device names raise `ReservationError`.

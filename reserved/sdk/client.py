@@ -105,12 +105,15 @@ class GrantedDevice:
     def torch_device(self) -> Any:
         """Return the process-local PyTorch device for this physical grant.
 
-        A CUDA grant resolves to the device torch reports with the same GPU
-        UUID, so the result is correct under any CUDA_VISIBLE_DEVICES, set or
-        unset, and the SDK never reads or writes the mask. This initializes
-        CUDA in the calling process, so call it in the process that will use
-        the GPU. A grant torch cannot see, a torch build that does not report
-        device UUIDs, and unsupported device kinds raise ReservationError.
+        PyTorch is expected to be installed in the calling process; this
+        package does not declare or install it, and no other SDK operation
+        imports it. A CUDA grant resolves to the device torch reports with
+        the same GPU UUID, so the result is correct under any
+        CUDA_VISIBLE_DEVICES, set or unset, and the SDK never reads or writes
+        the mask. This initializes CUDA in the calling process, so call it in
+        the process that will use the GPU. A grant torch cannot see, a torch
+        build that does not report device UUIDs, and unsupported device kinds
+        raise ReservationError.
         """
         device_type = self.device_name.partition(":")[0]
         import torch  # type: ignore[import]
