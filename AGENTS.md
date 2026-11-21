@@ -13,9 +13,11 @@ consumers a simple lifetime model.
 
 ## 1. Before editing
 
-- [ ] Read the relevant implementation and tests, plus `README.md` and
-  `ARCHITECTURE.md`. Treat `RESERVED_DESIGN.md` and `DAEMON_REFACTOR_PLAN.md`
-  as historical context, not proof of current behavior.
+- [ ] Read the relevant implementation and tests, plus `README.md`,
+  `ARCHITECTURE.md`, and `RESERVED_DESIGN.md`. All three describe the current
+  system: the README is the user guide, `ARCHITECTURE.md` the implementation
+  reference, and `RESERVED_DESIGN.md` the design and its rationale. When a
+  change alters behavior they describe, update them in the same change.
 - [ ] State the requested behavior, the observable result, and the guarantees
   that must remain true.
 - [ ] Identify the affected layers using the module map below.

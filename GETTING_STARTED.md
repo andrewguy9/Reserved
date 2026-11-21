@@ -237,7 +237,5 @@ configuration, follow the [installation guide](INSTALL.md).
 - [Installation guide](INSTALL.md): Linux systemd and macOS launchd setup, verification, and service management.
 - [Architecture](ARCHITECTURE.md): current protocol, device indices, and lease mechanics.
 - [Examples](examples/README.md): CPU walkthrough and Apple Silicon configuration.
+- [Design](RESERVED_DESIGN.md): the design and its rationale, kept current with the code.
 - [Contributor guide](AGENTS.md): implementation and verification rules when changing Reserved.
-
-`RESERVED_DESIGN.md` and `DAEMON_REFACTOR_PLAN.md` are historical context. Use
-the current implementation and the references above when integrating a client.

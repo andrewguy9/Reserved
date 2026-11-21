@@ -239,28 +239,41 @@ def status(ledger) -> StatusResult: ...
 
 Fully testable as plain function calls — no daemon, no sockets, no hardware required.
 
-### Imperative shell (`daemon.py`)
+### State layer (`daemon_state.py`)
 
-Owns the single mutable ledger reference and the `select` loop. Calls core functions and swaps the ledger reference with the result.
+Between the core and the sockets sits a pure state machine. One daemon step is a function of logical state and one event, returning new state and the effects the IO shell must perform:
 
-```python
-ledger = core.load_ledger(config)
-
-# on reserve request:
-ledger, result = core.grant(ledger, request)
-
-# on lease fd EOF:
-ledger = core.release(ledger, reservation_id)
+```text
+DaemonState + Event -> DaemonState + Effects
 ```
 
-No allocation logic in the shell — only IO, fd lifecycle, and ledger swapping.
+`DaemonState` holds the ledger, the open transports (connection id and buffered bytes), and the open leases (lease id and reservation id). It never holds a socket or a file descriptor: descriptors are process-local, recyclable integers, so the state layer identifies connections and leases by logical ids and the shell keeps the mapping to real sockets in a handle table.
+
+Events are what the shell observed: `Accepted`, `TransportReceived`, `TransportClosed`, `LeaseClosed`. Effects are what the shell must do: `SendBytes`, `CreateLease`, `SendLeaseFds`, `CloseTransport`, `CloseLease`.
+
+The three flows:
+
+- **Reserve.** Parse the request, call `core.grant()`. On failure the ledger is unchanged and the effects are a failure response and `CloseTransport`. On success the state carries the new ledger and one lease record per granted reservation, and the effects are `CreateLease` per lease, one `SendLeaseFds` with the response, and `CloseTransport`.
+- **Status.** Call `core.status()`, emit the response and `CloseTransport`. Ledger and leases unchanged.
+- **Lease close.** Look up the lease, `core.release()` its reservation, drop the lease record, emit `CloseLease`. This is the lifecycle invariant: a reservation exists exactly while its lease is open.
+
+A request that arrives without its terminating newline only extends the transport's buffer; nothing executes until the line is complete. Malformed input produces a failure response and no ledger change.
+
+`tests/test_daemon_state.py` exercises all of this as plain function calls, with no sockets.
+
+### IO shell (`daemon.py`)
+
+The shell owns the real sockets and the `select` loop. It translates readable descriptors into events, calls `daemon_state.step()`, and applies the returned effects: `CreateLease` makes a `socketpair()` and files the daemon end under the lease id, `SendLeaseFds` sends the client ends with `SCM_RIGHTS`, `SendBytes` writes a response, and the close effects close sockets and update the handle table. It also owns socket acquisition, signals, and the optional HTTP status server.
+
+No allocation logic and no state transitions live in the shell — only IO, descriptor lifecycle, and effect application. `tests/test_daemon_startup.py` and the inherited-lease tests exercise it against a real daemon process.
 
 ### Module structure
 
 ```
 reserved/
-  core.py        # pure functions, immutable Ledger
-  daemon.py      # imperative shell, select loop, SCM_RIGHTS
+  core.py          # pure functions, immutable Ledger
+  daemon_state.py  # pure state machine: DaemonState + Event -> DaemonState + Effects
+  daemon.py        # IO shell: sockets, select loop, SCM_RIGHTS, effect application
   paths.py       # socket discovery shared by daemon, SDK, and CLIs
   protocol.py    # single-line JSON serialization (explicit types only)
   sdk/

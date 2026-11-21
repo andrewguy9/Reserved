@@ -12,7 +12,7 @@ A single-machine, best-effort resource reservation daemon for physical hardware 
 installation from GitHub, a walkthrough requiring no GPU, and guidance
 on integrating an application or model worker.
 
-For installation and service management, see [INSTALL.md](INSTALL.md). For the detailed design, see [ARCHITECTURE.md](ARCHITECTURE.md). The original proposal is in [RESERVED_DESIGN.md](RESERVED_DESIGN.md).
+For installation and service management, see [INSTALL.md](INSTALL.md). For the implementation reference, see [ARCHITECTURE.md](ARCHITECTURE.md). For the design and its rationale, see [RESERVED_DESIGN.md](RESERVED_DESIGN.md).
 
 ---
 

@@ -845,8 +845,9 @@ All components — daemon, CLI tools, and SDK — are implemented in Python. The
 
 ```
 reserved/
-  core.py       # pure functions, no IO — the functional core; DeviceAllocation, cuda_uuid()
-  daemon.py     # imperative shell — owns the mutable ledger reference, drives the event loop
+  core.py          # pure functions, no IO — the functional core; DeviceAllocation, cuda_uuid()
+  daemon_state.py  # pure state machine: DaemonState + Event -> DaemonState + Effects
+  daemon.py        # IO shell — sockets, select loop, SCM_RIGHTS, effect application
   protocol.py   # serialization of explicit requests/responses to single-line JSON only
   sdk/
     client.py   # Reservation, Request, DeviceConstraint, torch_device()
@@ -908,23 +909,22 @@ assert ledger2.availability[0].available_ram_mb == 24576 - 8192
 assert ledger.availability[0].available_ram_mb == 24576
 ```
 
-### Imperative Shell (`daemon.py`)
+### State Layer (`daemon_state.py`) and IO Shell (`daemon.py`)
 
-The shell owns the single mutable reference to the current ledger and drives the `select` loop. It calls core functions and swaps the ledger reference with the result.
+Between the core and the sockets sits a pure state machine. One daemon step takes the logical daemon state and one observed event, and returns the new state plus the effects the IO shell must perform:
 
-```python
-ledger: Ledger = core.load_ledger(config)
-
-# on reserve request received:
-ledger, result = core.grant(ledger, request)
-# send result + lease fds to client via SCM_RIGHTS
-
-# on lease fd closed (detected via select):
-ledger = core.release(ledger, reservation_id)
-
-# on status request:
-result = core.status(ledger)
-# send result to client
+```text
+DaemonState + Event -> DaemonState + Effects
 ```
 
-The shell contains no allocation logic — it only handles IO, fd lifecycle, and ledger swapping. Integration tests for the shell run a real daemon subprocess and connect to it over a real socket.
+The state holds the ledger and the open transports and leases by logical id. It never holds a socket or a file descriptor. The IO shell (`daemon.py`) owns the real sockets, runs the `select` loop, translates readable descriptors into events, calls `daemon_state.step()`, and applies the effects: creating lease socketpairs, sending lease fds with `SCM_RIGHTS`, writing responses, and closing sockets.
+
+```python
+state = daemon_state.initial_state(core.load_ledger(config))
+
+# on any socket activity, translated to an event:
+state, effects = daemon_state.step(state, event)
+apply(effects)   # the only place sockets are touched
+```
+
+The shell contains no allocation logic and no state transitions — only IO, descriptor lifecycle, and effect application. The state layer is tested as plain function calls with no sockets; the shell is tested against a real daemon process. See [ARCHITECTURE.md](ARCHITECTURE.md#daemon-internals) for the events, effects, and flows.
