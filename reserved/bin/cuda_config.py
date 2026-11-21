@@ -1,27 +1,42 @@
-"""Generate a reserved config for the NVIDIA GPUs torch can see on this machine.
-
-Reads each card's GPU UUID, total memory, and streaming multiprocessor count
-from torch's device properties and prints a config whose device names are the
-``cuda:GPU-<uuid>`` form the daemon requires. ``ram_mb`` is the card's total
-memory in MiB and ``compute_units`` is its multiprocessor count. Pass
-``--ram-fraction`` to commit only part of each card's memory to reservations.
-
-Run it unmasked (no CUDA_VISIBLE_DEVICES) so every card is listed. PyTorch
-with CUDA support must be importable in the running interpreter.
-
-    python examples/cuda_config.py > ~/.config/reserved/reserved.json
-    python examples/cuda_config.py --ram-fraction 0.9 > reserved.json
-"""
+#!/usr/bin/env python3
+"""Generate a reserved config for the NVIDIA GPUs torch can see on this machine."""
 
 from __future__ import annotations
 
-import argparse
 import json
+import os
 import sys
 from typing import Any
 
+# Ensure the package is importable when run from the repo root.
+_here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _here not in sys.path:
+    sys.path.insert(0, _here)
+
+from reserved.cli import parse_options, usage_error
 from reserved.core import load_ledger
 from reserved.sdk import torch_cuda_uuid
+
+
+_USAGE = """Generate a reserved config for the NVIDIA GPUs torch can see.
+
+Usage:
+    reserved-cuda-config [--ram-fraction F]
+    reserved-cuda-config (-h | --help)
+
+Options:
+    -h --help         Show this help.
+    --ram-fraction F  Fraction of each card's memory to commit to
+                      reservations, in (0, 1] [default: 1.0].
+
+Reads each card's GPU UUID, total memory, and streaming multiprocessor count
+from torch's device properties and prints a config on stdout. Device names are
+cuda:GPU-<uuid>, ram_mb is the card's memory in MiB, and compute_units is its
+multiprocessor count. Run it with no CUDA_VISIBLE_DEVICES so every card is
+listed. PyTorch with CUDA support must be importable.
+
+    reserved-cuda-config > ~/.config/reserved/reserved.json
+"""
 
 MIB = 1024 * 1024
 
@@ -52,25 +67,25 @@ def render_config(torch_module: Any, ram_fraction: float = 1.0) -> str:
     return json.dumps(config, indent=2) + "\n"
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--ram-fraction", type=float, default=1.0,
-        help="fraction of each card's memory to commit to reservations (default: 1.0)",
-    )
-    args = parser.parse_args(argv)
+def main(argv: list[str] | None = None) -> None:
+    args = parse_options(_USAGE, argv)
+    try:
+        ram_fraction = float(args["--ram-fraction"])
+    except ValueError:
+        usage_error(f"--ram-fraction must be a number, got {args['--ram-fraction']!r}")
+
     try:
         import torch  # type: ignore[import]
     except ImportError as exc:
         print(f"error: PyTorch with CUDA support is required to read the cards: {exc}", file=sys.stderr)
-        return 1
+        sys.exit(1)
+
     try:
-        sys.stdout.write(render_config(torch, args.ram_fraction))
+        sys.stdout.write(render_config(torch, ram_fraction))
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
-    return 0
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

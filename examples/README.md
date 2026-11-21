@@ -31,10 +31,10 @@ environment that has PyTorch, with no `CUDA_VISIBLE_DEVICES` set so every card
 is listed:
 
 ```bash
-python examples/cuda_config.py > /tmp/reserved-cuda.json
+reserved-cuda-config > /tmp/reserved-cuda.json
 ```
 
-[cuda_config.py](cuda_config.py) reads each card's GPU UUID, total memory, and
+`reserved-cuda-config` reads each card's GPU UUID, total memory, and
 streaming multiprocessor count from torch's device properties. It names the
 devices `cuda:GPU-<uuid>`, sets `ram_mb` to the card's memory in MiB, and sets
 `compute_units` to its multiprocessor count (84 on an RTX A6000). A UUID names

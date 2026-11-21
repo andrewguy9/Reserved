@@ -270,6 +270,7 @@ reserved/
   bin/
     reserve.py       # CLI: constraint solver + exec wrapper
     reserve_status.py  # CLI: status query
+    cuda_config.py     # reserved-cuda-config: config from torch's view of the GPUs
 ```
 
 ### Language boundaries

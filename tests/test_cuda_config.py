@@ -1,18 +1,12 @@
 """The CUDA config generator turns torch's device properties into a config the daemon accepts."""
 
-import importlib.util
 import json
-from pathlib import Path
+import sys
 
 import pytest
 
+from reserved.bin import cuda_config
 from tests.cuda_support import cuda_name, fake_torch
-
-_SPEC = importlib.util.spec_from_file_location(
-    "cuda_config", Path(__file__).resolve().parent.parent / "examples" / "cuda_config.py",
-)
-cuda_config = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(cuda_config)
 
 CARD0 = "cuda:GPU-d0a59d46-9b93-1c68-c829-ef47cc823ecd"
 CARD1 = "cuda:GPU-8999ca79-2402-c426-afbf-0d64aee6aa2c"
@@ -60,3 +54,22 @@ def test_no_visible_cards_renders_an_empty_device_list():
 def test_torch_without_device_uuids_is_rejected():
     with pytest.raises(Exception, match="does not report CUDA device UUIDs"):
         cuda_config.render_config(fake_torch(cuda_name(0), with_uuid=False))
+
+
+def test_main_writes_the_config_for_the_cards_torch_sees(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "torch", fake_torch(CARD0, CARD1))
+
+    cuda_config.main(["--ram-fraction", "0.5"])
+
+    out = capsys.readouterr().out
+    assert json.loads(out)["devices"] == [
+        {"name": CARD0, "type": "cuda", "ram_mb": 24570, "compute_units": 84},
+        {"name": CARD1, "type": "cuda", "ram_mb": 24570, "compute_units": 84},
+    ]
+
+
+def test_main_rejects_a_non_numeric_ram_fraction(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cuda_config.main(["--ram-fraction", "half"])
+    assert exc.value.code == 2
+    assert "--ram-fraction" in capsys.readouterr().err
