@@ -9,7 +9,8 @@
 3. **Optional SDK** — a Python SDK provides a `Reservation` context manager for acquiring reservations and a `check()` method developers should call at natural checkpoints (between epochs, between inferences). If the daemon has restarted and the reservation is gone, `check()` raises `ReservationExpiredError` so the program can exit gracefully.
 4. **Daemon** — a lightweight process that holds the resource ledger in memory, grants/rejects reservation requests, and releases them when connections close. State is lost on restart.
 5. **Optional status API** — an HTTP endpoint and `reserve-status` CLI for operators to inspect current device capacity and active reservations.
-6. **Convenience wrapper** — a `reserve` shell script that wraps any non-reservation-aware program, acquiring a reservation and exec'ing the target command under it.
+6. **Convenience wrapper** — a `reserve` command that wraps any non-reservation-aware program, acquiring a reservation and exec'ing the target command under it.
+7. **Config generator** — `reserved-generate-config` writes the hardware config from what torch detects, so CUDA cards are named by GPU UUID without hand-editing.
 
 ---
 
@@ -38,8 +39,10 @@ Optionally serves an HTTP endpoint for monitoring (`--http PORT`).
 **`reserve`** — requests a reservation and execs a command under it. Sets `CUDA_VISIBLE_DEVICES` and other env vars before handing off to the command. The reservation is released when the command exits.
 
 ```bash
-reserve train type=cuda,model=a6000 -- python train.py
+reserve train type=cuda,ram=30720 -- python train.py
 ```
+
+**`reserved-generate-config`** — detects the hardware torch can see and prints a `reserved.json` for it. CUDA cards are named by GPU UUID with their memory and multiprocessor count filled in.
 
 **`reserve-status`** — prints the current state of all devices and active reservations. Accepts `--json` for scripting.
 
@@ -47,24 +50,24 @@ reserve train type=cuda,model=a6000 -- python train.py
 reserve-status
 
 Devices:
-  cuda:0  cuda  rtx3090  available: 24576/24576 MB  100/100 compute
-  cuda:1  cuda  rtx3090  available: 16384/24576 MB  50/100 compute
-  cuda:2  cuda  a6000    available: 49152/49152 MB  100/100 compute
+  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  cuda  available: 24576/24576 MB  100/100 compute
+  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781  cuda  available: 16384/24576 MB  50/100 compute
+  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782  cuda  available: 49152/49152 MB  100/100 compute
 
 Reservations:
   a3f9c2  label=train  age=2m14s
-    cuda:1  8192 MB  50 compute
+    cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781  8192 MB  50 compute
 ```
 
 ### SDKs
 
-**Python (`reserve`)** — a `Reservation` context manager that acquires a reservation on enter and releases it on exit. Suitable for notebooks, training scripts, or any Python process that needs to claim hardware for a block of work.
+**Python (`reserved.sdk`)** — a `Reservation` context manager that acquires a reservation on enter and releases it on exit. Suitable for notebooks, training scripts, or any Python process that needs to claim hardware for a block of work.
 
 ```python
-from reserve import Reservation, DeviceConstraint
+from reserved.sdk import Reservation, DeviceConstraint
 
 with Reservation("train", DeviceConstraint("cuda", ram_mb=16384)) as r:
-    model.to(r.devices[0].torch_device())
+    model.to(r.torch_devices()[0])
     run_training()
 ```
 
@@ -77,23 +80,25 @@ Defines the set of physical devices on this machine. The daemon loads this at st
 ```json
 {
   "devices": [
-    { "name": "cuda:0", "type": "cuda",  "model": "rtx3090",      "ram_mb": 24576, "compute_units": 100 },
-    { "name": "cuda:1", "type": "cuda",  "model": "rtx3090",      "ram_mb": 24576, "compute_units": 100 },
-    { "name": "cuda:2", "type": "cuda",  "model": "a6000",        "ram_mb": 49152, "compute_units": 100 },
-    { "name": "metal:0","type": "metal", "model": "m3-max",       "ram_mb": 36864, "compute_units": 100 },
-    { "name": "cpu",    "type": "cpu",                             "ram_mb": 65536 }
+    { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", "type": "cuda",  "ram_mb": 24576, "compute_units": 82 },
+    { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781", "type": "cuda",  "ram_mb": 24576, "compute_units": 82 },
+    { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "type": "cuda",  "ram_mb": 49152, "compute_units": 84 },
+    { "name": "metal:0", "type": "metal", "ram_mb": 36864, "compute_units": 100 },
+    { "name": "cpu", "type": "cpu", "ram_mb": 65536 }
   ]
 }
 ```
 
 Each device has:
 
-- `name` — unique identifier, returned in responses and set as `RESERVED_DEVICE`
+- `name` — unique physical identifier, returned in grants and set as `RESERVED_DEVICE`
 - `type` — `cuda`, `metal`, or `cpu`
-- `model` — optional human label for the hardware class (e.g. `rtx3090`, `a6000`, `m3-max`). Callers can filter on this to target specific hardware.
 - `ram_mb` — total reservable RAM. For CUDA devices this is VRAM; for Metal this is unified memory; for CPU this is system RAM. Multiple reservations can share a device as long as combined usage fits.
+- `compute_units` — optional opaque budget. No physical unit is implied; the meaning is a convention between the operator and callers. The generator fills in the GPU's streaming multiprocessor count.
 
-**CUDA device naming:** must be `cuda:N` where N is a non-negative integer matching the physical GPU index (as reported by `nvidia-smi`). The daemon validates this at startup.
+A device is exactly these fields. There is no free-form label: nothing a caller could ask for is left implicit.
+
+**CUDA device naming:** must be `cuda:GPU-<uuid>`, where the UUID is the lowercase one `nvidia-smi -L` prints for the card. The UUID names one specific board regardless of the driver's enumeration order, `CUDA_VISIBLE_DEVICES` accepts it directly, and torch reports it for every visible device. The daemon validates the form at startup. `reserved-generate-config` writes these names for you.
 
 **Metal device naming:** Apple Silicon has a single unified GPU. Use `metal:0` by convention. There is no standard index-based selection for Metal — `reserved` coordinates access via the reservation mechanism; processes select the device in code with `torch.device("mps")`.
 
@@ -102,17 +107,11 @@ A macOS config for an Apple Silicon machine:
 ```json
 {
   "devices": [
-    { "name": "metal:0", "type": "metal", "model": "m3-max", "ram_mb": 36864, "compute_units": 100 },
-    { "name": "cpu",     "type": "cpu",                       "ram_mb": 65536 }
+    { "name": "metal:0", "type": "metal", "ram_mb": 36864, "compute_units": 100 },
+    { "name": "cpu", "type": "cpu", "ram_mb": 65536 }
   ]
 }
 ```
-
-- `ram_mb` — total reservable RAM. For CUDA devices this is VRAM; for CPU this is system RAM. Multiple reservations can share a device as long as combined usage fits.
-
-- `compute_units` — optional opaque token budget. No physical unit is implied; the
-
-meaning is a convention between the operator and callers.
 
 ---
 
@@ -122,12 +121,14 @@ meaning is a convention between the operator and callers.
 
 ### Explicit Language (daemon protocol)
 
-The daemon speaks only in explicit terms. Every slot in a reserve request names a specific device and states exactly how much capacity to claim:
+The daemon speaks only in explicit terms. Every allocation in a reserve request names a specific device and states exactly how much capacity to claim:
 
 ```
-slot: name=cuda:0  ram_mb=8192  compute_units=50
-slot: name=cuda:1  ram_mb=4096  compute_units=25
+allocation: name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  ram_mb=8192  compute_units=50
+allocation: name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781  ram_mb=4096  compute_units=25
 ```
+
+This record, `DeviceAllocation`, is the only device record in the system. The client requests it, the daemon grants it back unchanged, the ledger holds it, and status reports it.
 
 No wildcards. No type matching. The daemon does not search or infer — it checks whether the named device has sufficient available capacity and subtracts if so. This keeps the daemon simple, correct, and easy to test.
 
@@ -136,23 +137,23 @@ No wildcards. No type matching. The daemon does not search or infer — it check
 Users and applications typically don't know or care which physical device they get — they just need a CUDA device with enough VRAM. The constraint language expresses this:
 
 ```
-slot: type=cuda  ram_mb=8192
-slot: type=cuda  model=rtx3090
-slot: name=cuda:0  ram_mb=8192   # explicit pin is also valid constraint syntax
+constraint: type=cuda  ram_mb=8192
+constraint: type=cuda  compute_units=40
+constraint: name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  ram_mb=8192   # a name pins one physical device
 ```
 
-The constraint language is resolved by a **constraint solver** before the request is submitted to the daemon. The solver reads the current status, finds devices satisfying the constraints, and produces an explicit request.
+A constraint has exactly four fields: `type`, `name`, `ram_mb`, and `compute_units`. Every field given narrows the choice. The constraint language is resolved by a **constraint solver** before the request is submitted to the daemon. The solver reads the current status, finds devices satisfying the constraints, and produces an explicit request. The SDK and CLI accept only constraints; pinning a device is a constraint with a `name`.
 
 ### Constraint Solvers
 
-A constraint solver is any function that takes a set of slot constraints and the current device status, and returns an explicit request. The SDK ships two:
+A constraint solver is any function that takes a set of device constraints and the current device status, and returns an explicit request. The SDK ships two:
 
-- **`ConsolidateSolver`** — packs slots onto as few physical devices as possible. Leaves the maximum amount of contiguous free capacity for other workloads. Good for co-location (e.g. checkpoint and LoRA on the same card). **Default for `Reservation`, `Request`, and the `reserve` CLI.**
-- **`SpreadSolver`** — distributes slots across as many physical devices as possible. Good for maximizing parallel throughput (e.g. TTS actors spread across cards).
+- **`ConsolidateSolver`** — packs allocations onto as few physical devices as possible. Leaves the maximum amount of contiguous free capacity for other workloads. Good for co-location (e.g. checkpoint and LoRA on the same card). **Default for `Reservation`, `Request`, and the `reserve` CLI.**
+- **`SpreadSolver`** — distributes allocations across as many physical devices as possible. Good for maximizing parallel throughput (e.g. TTS actors spread across cards).
 
 Both solvers express clear user intent. The choice between them is a statement about how the caller wants to share the machine with other workloads.
 
-Any caller can bypass SDK solvers entirely by submitting an explicit request directly to the daemon — this is what a sophisticated orchestrator does after running its own placement algorithm.
+An orchestrator that runs its own placement expresses the result as `name` constraints, or speaks the explicit protocol to the daemon directly.
 
 ```
 Constraint spec  →  Solver (reads status)  →  Explicit request  →  Daemon (check-and-subtract)
@@ -171,82 +172,81 @@ Requests follow a four-level hierarchy:
 ```
 Request
 └── Reservation  (one per independent lifetime)
-    └── Slot     (one per physical device)
+    └── Allocation  (one per physical device)
         └── Resource  (capacity claimed on that device)
 ```
 
 - **Request** — the atomic unit. All reservations in a request are granted together or the entire request is rejected. One wire message.
 - **Reservation** — a named grouping with its own handle (socket fd). Reservations within a request are granted atomically but released independently. The caller declares reservation boundaries explicitly based on intended lifetime — the daemon does not infer them.
-- **Slot** — one physical device within a reservation. A reservation can hold multiple slots; all slots are released when the reservation handle closes.
-- **Resource** — the capacity claimed on a slot's device (`ram_mb`, `compute_units`). Multiple slots can target the same physical device as long as combined capacity fits.
+- **Allocation** — one physical device within a reservation and the capacity claimed on it. A reservation can hold multiple allocations; all are released when the reservation handle closes.
+- **Resource** — the capacity claimed on an allocation's device (`ram_mb`, `compute_units`). Multiple allocations can target the same physical device as long as combined capacity fits.
 
-### Explicit slot fields (daemon protocol)
+### Allocation fields (daemon protocol)
 
-The daemon only accepts explicit slot specifications. Every slot must name a specific device:
+The daemon only accepts explicit allocations. Every allocation names a specific device:
 
 | Field | Description |
 | --- | --- |
-| name | Required. Physical device name (e.g. `cuda:0`, `metal:0`, `cpu`) |
+| name | Required. Physical device name (e.g. `cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780`, `metal:0`, `cpu`) |
 | ram_mb | Amount of RAM to claim on this device |
 | compute_units | Number of compute units to claim on this device |
 
-### Constraint slot fields (SDK and CLI)
+### Constraint fields (SDK and CLI)
 
-The SDK and CLI accept constraint-based slot specifications, which a solver resolves to explicit assignments before submitting to the daemon:
+The SDK and CLI accept device constraints, which a solver resolves to allocations before submitting to the daemon:
 
 | Field | Effect |
 | --- | --- |
 | type | Device must be this type (`cuda`, `metal`, or `cpu`) |
-| model | Device must have this model label |
+| name | Device must be this physical device |
 | ram_mb | Device must have at least this much available RAM |
 | compute_units | Device must have at least this many available compute units |
-| name | Pin directly to a named device, bypassing solver matching |
 
 **Constraint-based (SDK resolves before submitting):**
 
 ```
-# Single reservation, one slot: any CUDA device
-reservation(slot(type=cuda))
+# Single reservation, one allocation: any CUDA device
+reservation(constraint(type=cuda))
 
-# Single reservation, two slots: distributed job, released together
-reservation(slot(type=cuda), slot(type=cuda))
+# Single reservation, two allocations: distributed job, released together
+reservation(constraint(type=cuda), constraint(type=cuda))
 
 # Multiple reservations: stable diffusion, freed independently
 request(
-  reservation("checkpoint", slot(type=cuda, ram_mb=8192)),
-  reservation("lora",       slot(type=cuda, ram_mb=2048)),
+  reservation("checkpoint", constraint(type=cuda, ram_mb=8192)),
+  reservation("lora",       constraint(type=cuda, ram_mb=2048)),
 )
 
 # Multiple reservations: TTS actors, freed one by one
 request(
-  reservation("actor-1", slot(type=cuda, ram_mb=4096)),
-  reservation("actor-2", slot(type=cuda, ram_mb=4096)),
-  reservation("actor-3", slot(type=cuda, ram_mb=4096)),
-  reservation("actor-4", slot(type=cuda, ram_mb=4096)),
-  reservation("actor-5", slot(type=cuda, ram_mb=4096)),
+  reservation("actor-1", constraint(type=cuda, ram_mb=4096)),
+  reservation("actor-2", constraint(type=cuda, ram_mb=4096)),
+  reservation("actor-3", constraint(type=cuda, ram_mb=4096)),
+  reservation("actor-4", constraint(type=cuda, ram_mb=4096)),
+  reservation("actor-5", constraint(type=cuda, ram_mb=4096)),
 )
 ```
 
-**Explicit (orchestrator submits directly to daemon):**
+**Pinned (orchestrator has already chosen the cards):**
 
 ```
-# Orchestrator consolidates onto cuda:0 for co-location
+# Orchestrator consolidates onto one card for co-location
 request(
-  reservation("checkpoint", slot(name=cuda:0, ram_mb=8192)),
-  reservation("lora",       slot(name=cuda:0, ram_mb=2048)),
+  reservation("checkpoint", constraint(name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780, ram_mb=8192)),
+  reservation("lora",       constraint(name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780, ram_mb=2048)),
 )
 
 # Orchestrator spreads actors across two cards for throughput
 request(
-  reservation("actor-1", slot(name=cuda:0, ram_mb=4096)),
-  reservation("actor-2", slot(name=cuda:0, ram_mb=4096)),
-  reservation("actor-3", slot(name=cuda:1, ram_mb=4096)),
-  reservation("actor-4", slot(name=cuda:1, ram_mb=4096)),
-  reservation("actor-5", slot(name=cuda:1, ram_mb=4096)),
+  reservation("actor-1", constraint(name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780, ram_mb=4096)),
+  reservation("actor-2", constraint(name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780, ram_mb=4096)),
+  reservation("actor-3", constraint(name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781, ram_mb=4096)),
+  reservation("actor-4", constraint(name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781, ram_mb=4096)),
+  reservation("actor-5", constraint(name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781, ram_mb=4096)),
 )
 ```
 
-If an explicit request fails due to a race, the orchestrator re-reads status and re-plans. The daemon owns atomicity; the orchestrator owns strategy.
+A name constraint resolves to exactly that device if the capacity fits. If the request then fails at the daemon due to a race, the orchestrator re-reads status and re-plans. The daemon owns atomicity; the orchestrator owns strategy.
 
 ---
 
@@ -304,7 +304,7 @@ Line-delimited JSON over the UDS. Each message is one JSON object followed by `\
 
 **Reserve request:**
 
-A single request contains one or more reservations. Each reservation has a label and one or more slots. Each slot is a device constraint.
+A single request contains one or more reservations. Each reservation has a label and zero or more allocations. Each allocation names a device and the capacity to claim on it.
 
 ```json
 {
@@ -312,25 +312,25 @@ A single request contains one or more reservations. Each reservation has a label
   "reservations": [
     {
       "label": "checkpoint",
-      "slots": [
-        { "name": "cuda:2", "ram_mb": 8192, "compute_units": 50 }
+      "allocations": [
+        { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 8192, "compute_units": 50 }
       ]
     },
     {
       "label": "lora",
-      "slots": [
-        { "name": "cuda:2", "ram_mb": 2048, "compute_units": 0 }
+      "allocations": [
+        { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 2048, "compute_units": 0 }
       ]
     }
   ]
 }
 ```
 
-The daemon protocol is fully explicit — every slot names a specific device. Constraint resolution (type, model matching) happens in the SDK or CLI before this request is submitted. All slots across all reservations are checked atomically.
+The daemon protocol is fully explicit — every allocation names a specific device. Constraint resolution happens in the SDK or CLI before this request is submitted. All allocations across all reservations are checked atomically.
 
 **Reserve response (success):**
 
-The response contains one entry per reservation, each with its own `reservation_id` and assigned slots. `reservation_id` identifies the handle — closing the corresponding socket releases that reservation.
+The response contains one entry per reservation, each with its own `reservation_id` and its allocations. `reservation_id` identifies the handle — closing the corresponding socket releases that reservation.
 
 ```json
 {
@@ -339,22 +339,22 @@ The response contains one entry per reservation, each with its own `reservation_
     {
       "reservation_id": "a3f9c2",
       "label": "checkpoint",
-      "slots": [
-        { "device_name": "cuda:2", "cuda_ordinal": 2 }
+      "allocations": [
+        { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 8192, "compute_units": 50 }
       ]
     },
     {
       "reservation_id": "b7e1d4",
       "label": "lora",
-      "slots": [
-        { "device_name": "cuda:2", "cuda_ordinal": 2 }
+      "allocations": [
+        { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 2048, "compute_units": 0 }
       ]
     }
   ]
 }
 ```
 
-`slots` is parallel to the request `slots` array for that reservation. `cuda_ordinal` is the physical CUDA ordinal extracted from the device name (e.g. `cuda:2` → `2`). It is set directly in `CUDA_VISIBLE_DEVICES`; the child process then addresses the device as `cuda:0`, `cuda:1`, etc. (logical indices within what `CUDA_VISIBLE_DEVICES` exposes). Metal and CPU devices have `cuda_ordinal: -1`.
+Each granted allocation is the requested record echoed back unchanged. The grant carries nothing the request did not: the device name is the device's whole identity, and for CUDA it already contains the UUID that `CUDA_VISIBLE_DEVICES` and torch understand.
 
 Each reservation requires its own lease fd. For each granted reservation the daemon creates a `socketpair()` — two connected ends. The daemon retains one end and sends the other to the client via `SCM_RIGHTS` (Unix domain socket ancillary data) alongside the JSON response. The client receives N file descriptors — one per reservation — in the same message as the grant.
 
@@ -379,9 +379,8 @@ No resources are changed. No fds are sent.
 {
   "devices": [
     {
-      "name": "cuda:0",
+      "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780",
       "type": "cuda",
-      "model": "rtx3090",
       "ram_mb": 24576,
       "available_ram_mb": 16384,
       "compute_units": 100,
@@ -393,16 +392,16 @@ No resources are changed. No fds are sent.
       "id": "a3f9c2",
       "label": "checkpoint",
       "created_at": 1748000000.0,
-      "slots": [
-        { "device_name": "cuda:2", "ram_mb": 8192, "compute_units": 0 }
+      "allocations": [
+        { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 8192, "compute_units": 0 }
       ]
     },
     {
       "id": "b7e1d4",
       "label": "lora",
       "created_at": 1748000000.0,
-      "slots": [
-        { "device_name": "cuda:2", "ram_mb": 2048, "compute_units": 0 }
+      "allocations": [
+        { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 2048, "compute_units": 0 }
       ]
     }
   ]
@@ -411,11 +410,11 @@ No resources are changed. No fds are sent.
 
 ### Behavior on Reserve
 
-All slots across all reservations are checked atomically. The daemon does no constraint solving — every slot names a specific device.
+All allocations across all reservations are checked atomically. The daemon does no constraint solving — every allocation names a specific device.
 
-1. For each slot, check that the named device exists and has sufficient available `ram_mb` and `compute_units`.
-2. If any slot cannot be satisfied: respond `ok: false`, no resources are changed.
-3. If all slots are satisfied: subtract capacity from each named device, record all reservations, respond with the assignments.
+1. For each allocation, check that the named device exists and has sufficient available `ram_mb` and `compute_units`.
+2. If any allocation cannot be satisfied: respond `ok: false`, no resources are changed.
+3. If all allocations are satisfied: subtract capacity from each named device, record all reservations, respond with the same allocations.
 4. Hold each reservation's resources until its lease socketpair fd is closed.
 
 ### Lease Lifetime and Connection Model
@@ -426,7 +425,7 @@ Each reservation is represented by a separate open socket connection. The daemon
 
 ```
 client opens a single transport socket, sends reserve request
-  → daemon resolves all slots atomically
+  → daemon checks all allocations atomically
   → [if ok] daemon creates N lease fds (one per reservation)
             sends JSON response + N fds via SCM_RIGHTS in one message
   → client receives response and N fds
@@ -495,7 +494,7 @@ with Reservation("worker", DeviceConstraint("cuda", ram_mb=16384)) as r:
     pid = os.fork()
     if pid == 0:
         # child: still holds the reservation via inherited fd
-        run_worker(r.devices[0])
+        run_worker(r.torch_devices()[0])
         os._exit(0)
     # parent: reservation still live while child runs
     os.waitpid(pid, 0)
@@ -506,7 +505,7 @@ To pass a reservation to an exec'd child from Python:
 
 ```python
 with Reservation("worker", DeviceConstraint("cuda")) as r:
-    os.set_inheritable(r._sock.fileno(), True)
+    os.set_inheritable(r._lease_sock.fileno(), True)
     os.execvp("worker", ["worker"])
     # exec replaces this process; reservation held by worker until it exits
 ```
@@ -529,23 +528,22 @@ Alternatively, cross-reference `reserve-status` reservation ages and labels with
 Acquires a single reservation and runs a command under it.
 
 ```
-reserve LABEL [SLOT ...] [--socket PATH] -- CMD [ARGS...]
+reserve LABEL [DEVICE ...] [--socket PATH] -- CMD [ARGS...]
 
 Arguments:
   LABEL             Required. Human-readable name for this reservation (e.g. "train", "infer").
                     Shown in reserve-status output and daemon logs.
-  SLOT              Device constraint for one physical slot. Comma-separated fields:
-                    type=TYPE, name=NAME, model=MODEL, ram=MB, compute=N.
-                    All fields optional. Repeat for multiple slots. Omit entirely for
+  DEVICE            Constraint for one allocation. Comma-separated fields:
+                    type=TYPE, name=NAME, ram=MB, compute=N.
+                    All fields optional. Repeat for multiple allocations. Omit entirely for
                     no device constraint.
 
 Options:
   --solver NAME     Constraint solver to use: consolidate (default) or spread.
-                    Ignored when all slots use name= (explicit placement).
   --socket PATH     Daemon socket path [shared platform-aware default; see INSTALL.md]
 ```
 
-All slots belong to the single reservation and are granted atomically — all or none.
+All allocations belong to the single reservation and are granted atomically — all or none.
 
 ```bash
 # No device constraint
@@ -560,17 +558,14 @@ reserve infer type=metal -- python infer.py
 # Needs 30GB VRAM (rules out 3090s)
 reserve train type=cuda,ram=30720 -- python train.py
 
-# Specifically a 3090
-reserve infer type=cuda,model=rtx3090 -- python infer.py
-
 # Pin to a specific device by name
-reserve infer name=cuda:2 -- python infer.py
+reserve infer name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782 -- python infer.py
 
-# Two CUDA slots (distributed job)
+# Two CUDA allocations (distributed job)
 reserve distributed type=cuda type=cuda -- python distributed.py
 
-# One A6000 slot + one CPU slot
-reserve pipeline type=cuda,model=a6000 type=cpu,ram=32768 -- python pipeline.py
+# One CUDA allocation with 40 compute units + one CPU allocation
+reserve pipeline type=cuda,compute=40 type=cpu,ram=32768 -- python pipeline.py
 ```
 
 **What it does:**
@@ -586,21 +581,22 @@ CMD runs directly — no wrapper process sitting around it.
 
 | Variable | Value |
 | --- | --- |
-| CUDA_VISIBLE_DEVICES | Comma-separated physical CUDA ordinals of granted devices, e.g. `2` or `2,3` |
-| RESERVED_DEVICE | Physical name of the first granted accelerator device, e.g. `cuda:2` or `metal:0` |
+| CUDA_VISIBLE_DEVICES | Distinct GPU UUIDs of the granted CUDA devices in first-grant order, e.g. `GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` |
+| RESERVED_DEVICE | Physical name of the first granted accelerator device, e.g. `cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` or `metal:0` |
 | RESERVED_DEVICES | Comma-separated physical names of all granted devices |
+| RESERVED_GRANTED_ALLOCATIONS | JSON array of the granted allocations (`name`, `ram_mb`, `compute_units`) for SDK adoption |
 | RESERVED_ID | Reservation ID (opaque string) |
 | RESERVED_FD | File descriptor number of the lease socketpair end for this reservation, e.g. `3` |
 
-`RESERVED_FD` is one fd regardless of how many slots were granted — slots share a reservation and a single lease fd. It is not needed by typical programs (they simply inherit the fd and hold the lease by staying alive). It is useful for wrapper scripts that need to explicitly close the fd early, debugging tools that want to identify the lease fd, or fd-preserving child launchers that need to pass it along.
+`RESERVED_FD` is one fd regardless of how many allocations were granted — allocations share a reservation and a single lease fd. It is not needed by typical programs (they simply inherit the fd and hold the lease by staying alive). It is useful for wrapper scripts that need to explicitly close the fd early, debugging tools that want to identify the lease fd, or fd-preserving child launchers that need to pass it along.
 
 `CUDA_VISIBLE_DEVICES` is an NVIDIA-defined environment variable that the CUDA runtime, PyTorch, and other frameworks read at startup to determine which physical GPUs are visible to the process. By setting it before exec, `reserve` hooks into this existing operator infrastructure — the exec'd process sees only the devices it was granted, with no awareness of `reserved` or the full physical device layout.
 
 Two distinct concepts:
-- **Physical ordinal** — the integer in the device name (`cuda:2` → ordinal `2`). This is what goes into `CUDA_VISIBLE_DEVICES`.
-- **Logical index** — the 0-based position within what `CUDA_VISIBLE_DEVICES` exposes to the process. This is what `torch.device("cuda:N")` refers to inside the child.
+- **Physical identity** — the GPU UUID in the device name (`cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782`). This is what goes into `CUDA_VISIBLE_DEVICES`; the driver accepts UUIDs there directly.
+- **Logical index** — the 0-based position within what `CUDA_VISIBLE_DEVICES` exposes to the process. This is what `torch.device("cuda:0")` refers to inside the child.
 
-For example, if the daemon grants `cuda:2`, `reserve` sets `CUDA_VISIBLE_DEVICES=2`. Inside the process, the CUDA runtime remaps this so `torch.device("cuda:0")` targets physical `cuda:2`. A process granted `cuda:2` and `cuda:3` sees `CUDA_VISIBLE_DEVICES=2,3`; inside the process `torch.device("cuda:0")` → physical `cuda:2`, `torch.device("cuda:1")` → physical `cuda:3`.
+For example, if the daemon grants `cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782`, `reserve` sets `CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782`. Inside the process the CUDA runtime exposes one device, so `torch.device("cuda:0")` targets that card. A process granted cards 2 and 3 sees both UUIDs in the mask, in grant order; inside the process `torch.device("cuda:0")` is card 2 and `torch.device("cuda:1")` is card 3. The SDK's `torch_device()` does this lookup by asking torch for each visible device's UUID, so it needs no knowledge of the mask.
 
 Metal does not have an equivalent device-selection environment variable — there is only one logical MPS device per system. `reserved` coordinates access to the Metal device via the reservation mechanism; the exec'd process selects it in code (e.g. `torch.device("mps")`).
 
@@ -611,7 +607,7 @@ Metal does not have an equivalent device-selection environment variable — ther
 ## Python SDK
 
 ```python
-from reserve import Request, Reservation, DeviceConstraint, ReservationError
+from reserved.sdk import Request, Reservation, DeviceConstraint, ReservationError
 ```
 
 **Single reservation — use `Reservation` directly as a context manager:**
@@ -619,23 +615,22 @@ from reserve import Request, Reservation, DeviceConstraint, ReservationError
 ```python
 # Any CUDA device
 with Reservation("infer", DeviceConstraint("cuda")) as r:
-    model.to(r.devices[0].torch_device())
+    model.to(r.torch_devices()[0])
     run_model()
 
 # Metal device (Apple Silicon)
 with Reservation("infer", DeviceConstraint("metal")) as r:
-    model.to(r.devices[0].torch_device())   # torch.device("mps")
+    model.to(r.torch_devices()[0])   # torch.device("mps")
     run_model()
 
-# Needs 30GB VRAM — rules out 3090s
+# Needs 30GB VRAM
 with Reservation("infer", DeviceConstraint("cuda", ram_mb=30720)) as r:
-    model.to(r.devices[0].torch_device())
+    model.to(r.torch_devices()[0])
     ...
 
 # Two CUDA devices in one reservation — released together
-# torch_device() returns the physical device e.g. torch.device("cuda:2"), torch.device("cuda:3")
 with Reservation("distributed", DeviceConstraint("cuda"), DeviceConstraint("cuda")) as r:
-    devices = r.torch_devices()   # one torch.device per slot, in constraint order
+    devices = r.torch_devices()   # one process-local torch.device per allocation, in constraint order
     run_distributed(devices)
 ```
 
@@ -652,10 +647,10 @@ req = Request(
 checkpoint, lora = req.acquire()
 
 with checkpoint:
-    ckpt_device = checkpoint.devices[0].torch_device()   # e.g. torch.device("cuda:2")
+    (ckpt_device,) = checkpoint.torch_devices()
     load_checkpoint(ckpt_device)
     with lora:
-        lora_device = lora.devices[0].torch_device()   # may be same physical device as checkpoint
+        (lora_device,) = lora.torch_devices()   # may be the same physical device as checkpoint
         load_lora(lora_device)
         run_inference()
     # lora released here, VRAM returned to pool
@@ -668,68 +663,56 @@ actors = Request(*[
 ]).acquire()
 
 for actor, line in zip(actors, script):
-    device = actor.devices[0].torch_device()   # physical device e.g. torch.device("cuda:1")
+    (device,) = actor.torch_devices()
     render(device, line)
     actor.release()   # frees this actor's VRAM immediately
 ```
 
-**Two paths: constraint-based and explicit**
+**One input language: constraints**
 
-The SDK supports two entry points depending on how much control the caller needs:
-
-**Constraint-based** — pass `DeviceConstraint` objects. The SDK runs a solver against current device status to produce an explicit assignment before submitting to the daemon. `ConsolidateSolver` is the default.
+Every argument to `Reservation` is a `DeviceConstraint`. The SDK runs a solver against current device status to resolve each constraint to a `DeviceAllocation` before submitting to the daemon. `ConsolidateSolver` is the default. An orchestrator that has already decided placement pins each card with a `name` constraint; the solver then only checks that the capacity fits.
 
 ```python
-# Constraint-based: SDK picks the device
+# Solver picks the device
 with Reservation("infer", DeviceConstraint("cuda", ram_mb=8192)) as r:
     ...
 
-# Constraint-based with explicit solver choice
+# Explicit solver choice
 with Reservation("infer", DeviceConstraint("cuda", ram_mb=8192), solver=SpreadSolver()) as r:
     ...
-```
 
-**Explicit** — pass `ExplicitSlot` objects. The SDK submits directly to the daemon with no solver step. Use this when an orchestrator has already decided placement.
-
-```python
-# Explicit: orchestrator pins to cuda:0
-with Reservation("infer", ExplicitSlot("cuda:0", ram_mb=8192)) as r:
+# Orchestrator pins a card
+with Reservation("infer", DeviceConstraint(name="cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", ram_mb=8192)) as r:
     ...
 
-# Explicit multi-reservation: orchestrator controls packing
+# Orchestrator controls packing across reservations
 req = Request(
-    Reservation("checkpoint", ExplicitSlot("cuda:0", ram_mb=8192)),
-    Reservation("lora",       ExplicitSlot("cuda:0", ram_mb=2048)),
+    Reservation("checkpoint", DeviceConstraint(name="cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", ram_mb=8192)),
+    Reservation("lora",       DeviceConstraint(name="cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", ram_mb=2048)),
 )
 checkpoint, lora = req.acquire()
 ```
 
-**`Reservation(label, *slots, solver=ConsolidateSolver())`**
+**`Reservation(label, *constraints, solver=ConsolidateSolver())`**
 
-Label is required and positional. Slots are either `DeviceConstraint` or `ExplicitSlot` objects — not mixed. All slots share the same lease fd and are released together. `solver` is ignored when slots are `ExplicitSlot`.
+Label is required and positional. Every other positional argument is a `DeviceConstraint`; anything else is a `TypeError`. All allocations share the same lease fd and are released together.
 
-**`DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)`**
+**`DeviceConstraint(type, *, name=None, ram_mb=0, compute_units=0)`**
 
-All fields except `type` are optional. `type` may be omitted (`None`) to match any device type.
-
-**`ExplicitSlot(name, *, ram_mb=0, compute_units=0)`**
-
-Names a specific physical device. No solver is involved — the request goes directly to the daemon.
+Every field is optional. `type` may be omitted (`None`) to match any device type; `name` pins one physical device; `ram_mb` and `compute_units` must fit in the device's available capacity.
 
 **`Reservation` fields and methods after `acquire()`:**
 
 - `reservation_id: str`
 - `label: str`
-- `devices: list[GrantedDevice]` — parallel to the constraints passed at construction
-- `torch_devices() -> list[torch.device]` — convenience wrapper over `[d.torch_device() for d in self.devices]`
-- `release()` — closes the lease fd, releasing all slots in this reservation
+- `devices: list[DeviceAllocation]` — the granted allocations, parallel to the constraints passed at construction
+- `torch_devices() -> list[torch.device]` — `[torch_device(a) for a in self.devices]`
+- `release()` — closes the lease fd, releasing all allocations in this reservation
 - `check()` — see below
 
-**`GrantedDevice` fields and methods:**
+**`torch_device(allocation) -> torch.device`**
 
-- `device_name: str` — physical device name, e.g. `"cuda:2"` or `"metal:0"`
-- `cuda_ordinal: int` — physical CUDA ordinal from the device name (e.g. `cuda:2` → `2`). Used directly in `torch.device("cuda:N")`. `-1` for non-CUDA devices.
-- `torch_device() -> torch.device` — returns `torch.device("cuda:N")` using the physical ordinal for CUDA, `torch.device("mps")` for Metal, `torch.device("cpu")` for CPU. The SDK does not set `CUDA_VISIBLE_DEVICES` — use the `reserve` CLI if you need process-level GPU masking.
+Resolves one granted allocation to the process-local PyTorch device. For CUDA it asks torch for each visible device's UUID and returns the index whose UUID matches the allocation's name, so the result is right whether `CUDA_VISIBLE_DEVICES` is unset, set by `reserve`, or set by a scheduler; the SDK never reads or writes the mask. Metal resolves to `torch.device("mps")` and CPU to `torch.device("cpu")`. PyTorch is expected to be installed in the calling process; the package does not declare it, and no other SDK operation imports it. Resolving a CUDA grant initializes CUDA, so call it in the process that will use the GPU.
 
 **`check()`**
 
@@ -774,25 +757,25 @@ Default output is human-readable text:
 
 ```
 Devices:
-  cuda:0  cuda  rtx3090  available:  8192/24576 MB  100/100 compute
-  cuda:1  cuda  rtx3090  available:  4096/24576 MB  100/100 compute
-  cuda:2  cuda  a6000    available: 49152/49152 MB  100/100 compute
-  cpu     cpu            available: 65536/65536 MB
+  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  cuda  available:  8192/24576 MB  100/100 compute
+  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781  cuda  available:  4096/24576 MB  100/100 compute
+  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782  cuda  available: 49152/49152 MB  100/100 compute
+  cpu  cpu  available: 65536/65536 MB
 
 Reservations:
   a3f9c2  label=actor-1  age=3m12s
-    cuda:0  4096 MB
+    cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  4096 MB
   b7e1d4  label=actor-2  age=3m12s
-    cuda:0  4096 MB
+    cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  4096 MB
   c2a8f1  label=actor-3  age=3m12s
-    cuda:0  4096 MB
+    cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  4096 MB
   d9b3e7  label=actor-4  age=3m12s
-    cuda:1  4096 MB
+    cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781  4096 MB
   e4f6c9  label=actor-5  age=3m12s
-    cuda:1  4096 MB
+    cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781  4096 MB
 ```
 
-Three actors are packed onto `cuda:0`, two onto `cuda:1`. As each actor finishes its lines, its reservation is freed and that VRAM returns to the pool — the other actors are unaffected.
+Three actors are packed onto the first card, two onto the second. As each actor finishes its lines, its reservation is freed and that VRAM returns to the pool — the other actors are unaffected.
 
 With `--json`, prints the raw status JSON for use in scripts:
 
@@ -842,12 +825,12 @@ The daemon logs all active reservations at shutdown (`SIGTERM`) so operators can
 
 ### Language Boundaries
 
-The constraint language never crosses a process boundary. `DeviceConstraint`, `ExplicitSlot`, and solver classes are in-process Python objects only — they are never serialized. Only explicit requests hit the wire.
+The constraint language never crosses a process boundary. `DeviceConstraint` and the solver classes are in-process Python objects only — they are never serialized. Only explicit requests of `DeviceAllocation` records hit the wire.
 
 The wire format is single-line JSON over the Unix domain socket. Each message is one JSON object terminated by `\n`. `protocol.py` owns all serialization and deserialization of explicit requests and responses. Constraint types never appear in `protocol.py`.
 
 ```
-In-process (SDK):          DeviceConstraint → Solver → ExplicitRequest
+In-process (SDK):          DeviceConstraint → Solver → ReserveRequest of DeviceAllocations
                                                               ↓
 Wire (protocol.py):                               single-line JSON \n
                                                               ↓
@@ -856,22 +839,23 @@ In-process (daemon):                              core.grant(ledger, request)
 
 ### Implementation Language
 
-All components — daemon, CLI tools, and SDK — are implemented in Python. The `reserve` and `reserve-status` CLIs are Python scripts installed as executables. Python is required for SCM_RIGHTS fd passing, socketpair management, and the constraint solver logic.
+All components — daemon, CLI tools, and SDK — are implemented in Python. The `reserve`, `reserve-status`, and `reserved-generate-config` CLIs are Python scripts installed as executables. Python is required for SCM_RIGHTS fd passing, socketpair management, and the constraint solver logic.
 
 ### Module Structure
 
 ```
 reserved/
-  core.py       # pure functions, no IO — the functional core
+  core.py       # pure functions, no IO — the functional core; DeviceAllocation, cuda_uuid()
   daemon.py     # imperative shell — owns the mutable ledger reference, drives the event loop
   protocol.py   # serialization of explicit requests/responses to single-line JSON only
   sdk/
-    client.py   # Reservation, Request, DeviceConstraint, ExplicitSlot
+    client.py   # Reservation, Request, DeviceConstraint, torch_device()
     solvers.py  # ConsolidateSolver, SpreadSolver
     errors.py   # ReservationError, DaemonNotRunningError, ReservationExpiredError
   bin/
-    reserve     # CLI: constraint solver + exec wrapper
-    reserve-status  # CLI: status query
+    reserve.py          # CLI: constraint solver + exec wrapper
+    reserve_status.py   # CLI: status query
+    generate_config.py  # CLI: config from the hardware torch detects
 ```
 
 ### Functional Core (`core.py`)
@@ -883,7 +867,12 @@ All business logic lives here as pure functions. No IO, no sockets, no global st
 class Device:
     name: str
     type: str
-    model: str | None
+    ram_mb: int
+    compute_units: int
+
+@dataclass(frozen=True)
+class DeviceAllocation:
+    name: str
     ram_mb: int
     compute_units: int
 
@@ -905,13 +894,13 @@ def release(ledger: Ledger, reservation_id: str) -> Ledger: ...
 def status(ledger: Ledger) -> StatusResult: ...
 ```
 
-`grant()` checks all explicit slot assignments atomically. If any named device lacks sufficient capacity, it returns the original ledger unchanged and a failure result. If all slots are satisfied, it returns a new ledger with capacity subtracted and a success result containing the assignments.
+`grant()` checks all allocations atomically. If any named device lacks sufficient capacity, it returns the original ledger unchanged and a failure result. If all allocations are satisfied, it returns a new ledger with capacity subtracted and a success result carrying the same allocations.
 
 This design means the core is fully testable as plain function calls — no daemon, no sockets, no hardware required.
 
 ```python
 # example test
-ledger = load_ledger({"devices": [{"name": "cuda:0", "type": "cuda", "ram_mb": 24576, ...}]})
+ledger = load_ledger({"devices": [{"name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", "type": "cuda", "ram_mb": 24576, ...}]})
 ledger2, result = grant(ledger, request)
 assert result.ok
 assert ledger2.availability[0].available_ram_mb == 24576 - 8192
