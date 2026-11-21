@@ -33,11 +33,10 @@ Users typically don't know or care which physical device they get — they just 
 
 ```
 constraint: type=cuda  ram_mb=8192
-constraint: type=cuda  model=rtx3090
 constraint: name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782  ram_mb=8192
 ```
 
-Every field narrows the choice: `type` and `model` match the device config, `name` pins one physical device, and `ram_mb` and `compute_units` must fit its available capacity. A **constraint solver** resolves constraints against current device status and produces an explicit request before submitting to the daemon. The SDK and CLI accept only constraints; a pinned device is a constraint with a `name`.
+Every field narrows the choice: `type` matches the device config, `name` pins one physical device, and `ram_mb` and `compute_units` must fit its available capacity. A **constraint solver** resolves constraints against current device status and produces an explicit request before submitting to the daemon. The SDK and CLI accept only constraints; a pinned device is a constraint with a `name`.
 
 ### Constraint solvers
 

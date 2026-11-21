@@ -5,7 +5,7 @@ Public API:
   Reservation(label, *constraints, solver=ConsolidateSolver(), socket_path=None)
   adopt_inherited_lease()
   Request(*reservations, socket_path=None)
-  DeviceConstraint(type, *, model=None, name=None, ram_mb=0, compute_units=0)
+  DeviceConstraint(type, *, name=None, ram_mb=0, compute_units=0)
   GrantedDevice(device_name)
 """
 
@@ -56,13 +56,12 @@ os.register_at_fork(after_in_child=_reset_inherited_lease_lock)
 class DeviceConstraint:
     """What a reservation needs from one device; the solver picks the device.
 
-    Every field given narrows the choice. ``type`` and ``model`` must match
-    the device's config, ``name`` pins one physical device, and ``ram_mb``
-    and ``compute_units`` must fit in its available capacity. The solver
-    turns each constraint into a DeviceAllocation naming the chosen device.
+    Every field given narrows the choice. ``type`` must match the device's
+    configured type, ``name`` pins one physical device, and ``ram_mb`` and
+    ``compute_units`` must fit in its available capacity. The solver turns
+    each constraint into a DeviceAllocation naming the chosen device.
     """
     type: str | None = None
-    model: str | None = None
     name: str | None = None
     ram_mb: int = 0
     compute_units: int = 0
@@ -71,13 +70,11 @@ class DeviceConstraint:
         self,
         type: str | None = None,
         *,
-        model: str | None = None,
         name: str | None = None,
         ram_mb: int = 0,
         compute_units: int = 0,
     ) -> None:
         self.type = type
-        self.model = model
         self.name = name
         self.ram_mb = ram_mb
         self.compute_units = compute_units

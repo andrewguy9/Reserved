@@ -68,10 +68,6 @@ class TestConsolidateSolver:
         req = self._solve([("job", [DeviceConstraint("cpu")])])
         assert req.reservations[0].allocations[0].name == "cpu"
 
-    def test_model_filter(self):
-        req = self._solve([("job", [DeviceConstraint("cuda", model="a6000")])])
-        assert req.reservations[0].allocations[0].name == "cuda:GPU-00000000-0000-0000-0000-000000000002"
-
     def test_ram_filter_excludes_small(self):
         # Request more than cuda:GPU-00000000-0000-0000-0000-000000000001 has available (8192 MB).
         req = self._solve([("job", [DeviceConstraint("cuda", ram_mb=10000)])])
@@ -110,7 +106,7 @@ class TestConsolidateSolver:
 
     def test_no_matching_device_raises(self):
         with pytest.raises(ValueError, match="no device"):
-            self._solve([("job", [DeviceConstraint("cuda", model="nonexistent")])])
+            self._solve([("job", [DeviceConstraint("tpu")])])
 
     def test_two_allocations_consolidated(self):
         """Two constraints should both be assigned, consuming simulated capacity."""

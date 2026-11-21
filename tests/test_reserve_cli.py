@@ -13,8 +13,8 @@ from reserved.sdk.solvers import ConsolidateSolver
 
 
 def test_parse_device_spec_ram_and_compute_aliases_are_equivalent():
-    short = parse_device_spec("type=cuda,model=a6000,ram=8192,compute=25")
-    long = parse_device_spec("type=cuda,model=a6000,ram_mb=8192,compute_units=25")
+    short = parse_device_spec("type=cuda,ram=8192,compute=25")
+    long = parse_device_spec("type=cuda,ram_mb=8192,compute_units=25")
 
     assert isinstance(short, DeviceConstraint)
     assert isinstance(long, DeviceConstraint)

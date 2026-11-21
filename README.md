@@ -169,7 +169,6 @@ Each `DEVICE` is one allocation in the reservation, written as comma-separated f
 | Field | Effect |
 | --- | --- |
 | `type=TYPE` | Device type: `cuda`, `metal`, or `cpu` |
-| `model=MODEL` | Device model label (e.g. `rtx3090`) |
 | `ram=MB` | Minimum available RAM in MB |
 | `compute=N` | Minimum available compute units |
 | `name=NAME` | Pin to a physical device by its configured name |
@@ -183,9 +182,6 @@ reserve infer type=metal -- python infer.py
 
 # Needs 30GB VRAM
 reserve train type=cuda,ram=30720 -- python train.py
-
-# Specific model
-reserve infer type=cuda,model=rtx3090 -- python infer.py
 
 # Pin to a physical device
 reserve infer name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782 -- python infer.py
@@ -390,7 +386,7 @@ Devices have the following fields:
 | --- | --- |
 | `name` | Unique physical identifier. CUDA uses `cuda:GPU-<uuid>` with the lowercase UUID printed by `nvidia-smi -L`. Metal uses `metal:0`. |
 | `type` | `cuda`, `metal`, or `cpu` |
-| `model` | Optional label for the hardware class |
+| `model` | Optional label for the hardware class, shown by `reserve-status` |
 | `ram_mb` | Total reservable RAM (VRAM for CUDA, unified memory for Metal, system RAM for CPU) |
 | `compute_units` | Optional opaque budget — convention between operator and callers |
 

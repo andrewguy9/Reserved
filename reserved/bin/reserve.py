@@ -41,7 +41,6 @@ Options:
 DEVICE format: comma-separated key=value pairs. Each DEVICE is a constraint
 the solver resolves to one allocation; name= pins a specific device.
     type=TYPE        Device type (cuda, metal, cpu)
-    model=MODEL      Device model label
     ram=MB           RAM in MB (alias for ram_mb)
     compute=N        Compute units (alias for compute_units)
     name=NAME        Pin to a physical device.
@@ -68,7 +67,6 @@ def parse_device_spec(spec: str) -> DeviceConstraint:
 
     return DeviceConstraint(
         type=fields.get("type"),
-        model=fields.get("model"),
         name=fields.get("name"),
         ram_mb=int(fields.get("ram", fields.get("ram_mb", 0))),
         compute_units=int(fields.get("compute", fields.get("compute_units", 0))),

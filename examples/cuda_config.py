@@ -29,8 +29,8 @@ def model_label(product_name: str) -> str:
     """Turn an nvidia-smi product name into a config ``model`` label.
 
     ``NVIDIA RTX A6000`` becomes ``rtx-a6000``: the vendor prefix is dropped
-    and the rest is lowercased with spaces replaced by hyphens, so the label
-    can be passed on the command line as ``model=rtx-a6000`` without quoting.
+    and the rest is lowercased with spaces replaced by hyphens. The label is
+    informational; ``reserve-status`` shows it next to each device.
     """
     name = product_name.strip()
     if name.upper().startswith("NVIDIA "):

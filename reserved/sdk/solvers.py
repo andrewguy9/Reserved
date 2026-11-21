@@ -38,8 +38,6 @@ def _matches(device: DeviceStatusDict, constraint: "DeviceConstraint") -> bool:
         return False
     if constraint.type is not None and device["type"] != constraint.type:
         return False
-    if constraint.model is not None and device.get("model") != constraint.model:
-        return False
     if device["available_ram_mb"] < constraint.ram_mb:
         return False
     if device["available_compute_units"] < constraint.compute_units:
