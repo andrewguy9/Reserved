@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import types
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier

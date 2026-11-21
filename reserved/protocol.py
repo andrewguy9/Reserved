@@ -15,12 +15,9 @@ from typing import Any
 
 from .core import (
     DeviceAllocation,
-    DeviceStatus,
     GrantFailure,
     GrantSuccess,
-    GrantedReservation,
     ReservationRequest,
-    ReservationStatus,
     ReserveRequest,
     StatusResult,
 )

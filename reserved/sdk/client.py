@@ -19,8 +19,8 @@ import select
 import socket
 import threading
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 from reserved import protocol
 from reserved.core import (

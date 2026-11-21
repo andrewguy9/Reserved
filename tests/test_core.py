@@ -8,9 +8,6 @@ import time
 import pytest
 
 from reserved.core import (
-    ActiveReservation,
-    Device,
-    DeviceAvailability,
     DeviceAllocation,
     GrantFailure,
     GrantSuccess,

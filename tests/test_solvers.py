@@ -6,7 +6,6 @@ import pytest
 
 from reserved.sdk.client import DeviceConstraint, ExplicitSlot
 from reserved.sdk.solvers import ConsolidateSolver, SpreadSolver
-from reserved.core import DeviceAllocation
 
 
 DEVICES = [

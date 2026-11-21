@@ -12,7 +12,7 @@ Two built-in solvers:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .client import DeviceConstraint, ReservationSpec

@@ -22,7 +22,6 @@ from reserved.protocol import (
     grant_failure_to_wire,
     grant_success_to_wire,
     parse_request,
-    parse_response,
     reserve_request_to_wire,
     status_request_to_wire,
     status_result_to_wire,
