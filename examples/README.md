@@ -19,27 +19,30 @@ Run these commands from the repository root on a Linux machine with NVIDIA GPUs.
 Use an environment with ReserveD installed and a CUDA-enabled build of PyTorch
 for the worker. See the [PyTorch installation selector](https://pytorch.org/get-started/locally/).
 
-Check which GPUs the machine exposes, their UUIDs, and how much memory they have:
+Check which GPUs the machine exposes and their UUIDs:
 
 ```bash
 nvidia-smi -L
-nvidia-smi --query-gpu=index,name,memory.total --format=csv
 ```
 
 The example configs use placeholder UUIDs. Generate a config for the cards
-actually in the machine instead of editing them by hand:
+actually in the machine instead of editing them by hand, from the same
+environment that has PyTorch, with no `CUDA_VISIBLE_DEVICES` set so every card
+is listed:
 
 ```bash
 python examples/cuda_config.py > /tmp/reserved-cuda.json
 ```
 
-[cuda_config.py](cuda_config.py) reads each card's UUID and total memory from
-`nvidia-smi`, names the devices `cuda:GPU-<uuid>`, and sets `ram_mb` to the
-card's full memory. A UUID names one specific card, so no device-ordering
-setting is needed. Pass `--ram-fraction 0.9` to commit only part of each card;
-budgets are entries in the reservation ledger and should reflect the memory you
-can commit to participating workloads. Use the generated names in the
-`reserve` commands below.
+[cuda_config.py](cuda_config.py) reads each card's GPU UUID, total memory, and
+streaming multiprocessor count from torch's device properties. It names the
+devices `cuda:GPU-<uuid>`, sets `ram_mb` to the card's memory in MiB, and sets
+`compute_units` to its multiprocessor count (84 on an RTX A6000). A UUID names
+one specific card, so no device-ordering setting is needed. Pass
+`--ram-fraction 0.9` to commit only part of each card's memory; budgets are
+entries in the reservation ledger and should reflect the memory you can commit
+to participating workloads. Use the generated names in the `reserve` commands
+below.
 
 In the first terminal, start a demo daemon. Use [cuda.json](cuda.json) for one
 card or substitute [cuda_dual.json](cuda_dual.json) for two cards. Stop the demo

@@ -7,6 +7,7 @@ Public API:
   Request(*reservations, socket_path=None)
   DeviceConstraint(type, *, name=None, ram_mb=0, compute_units=0)
   torch_device(allocation)   # PyTorch device for one granted DeviceAllocation
+  torch_cuda_uuid(properties)  # GPU-<uuid> of a torch CUDA device
 """
 
 from __future__ import annotations
@@ -109,6 +110,19 @@ def torch_device(allocation: DeviceAllocation) -> Any:
     return torch.device(torch_name)
 
 
+def torch_cuda_uuid(properties: Any) -> str:
+    """Return the ``GPU-<uuid>`` identity of a torch CUDA device from its properties.
+
+    *properties* is what ``torch.cuda.get_device_properties(i)`` returns. The
+    UUID is the one ``nvidia-smi -L`` prints and a ``cuda:`` device name
+    carries. Raises ReservationError if this torch build does not report it.
+    """
+    raw = getattr(properties, "uuid", None)
+    if raw is None:
+        raise ReservationError("this torch build does not report CUDA device UUIDs")
+    return "GPU-" + str(uuid.UUID(bytes=bytes(raw.bytes)))
+
+
 def _torch_cuda_index(physical_name: str, torch_module: Any) -> int:
     """Return the index torch assigns to the CUDA device named by *physical_name*.
 
@@ -123,14 +137,10 @@ def _torch_cuda_index(physical_name: str, torch_module: Any) -> int:
 
     visible: list[str] = []
     for index in range(torch_module.cuda.device_count()):
-        properties = torch_module.cuda.get_device_properties(index)
-        raw = getattr(properties, "uuid", None)
-        if raw is None:
-            raise ReservationError(
-                f"cannot map physical device {physical_name!r}: this torch build does "
-                "not report CUDA device UUIDs"
-            )
-        reported = "GPU-" + str(uuid.UUID(bytes=bytes(raw.bytes)))
+        try:
+            reported = torch_cuda_uuid(torch_module.cuda.get_device_properties(index))
+        except ReservationError as exc:
+            raise ReservationError(f"cannot map physical device {physical_name!r}: {exc}") from exc
         if reported == wanted:
             return index
         visible.append(reported)

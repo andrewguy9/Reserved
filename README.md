@@ -123,8 +123,8 @@ verification using [INSTALL.md](INSTALL.md).
 
 CUDA devices are named by GPU UUID, exactly as `nvidia-smi -L` prints it, so a
 name identifies one specific card regardless of driver enumeration order.
-`python examples/cuda_config.py` writes this config for the cards in the machine,
-with each card's full memory as its budget.
+`python examples/cuda_config.py` writes this config for the cards torch can see,
+with each card's memory as `ram_mb` and its multiprocessor count as `compute_units`.
 
 Create `~/.config/reserved` with `mkdir -p ~/.config/reserved` and save the JSON
 as `reserved.json` there (or pass `--config PATH`). Adapt the devices and budgets

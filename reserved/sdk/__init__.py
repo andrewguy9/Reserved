@@ -9,6 +9,7 @@ from .client import (
     Request,
     Reservation,
     adopt_inherited_lease,
+    torch_cuda_uuid,
     torch_device,
 )
 from .errors import (
@@ -26,6 +27,7 @@ __all__ = [
     "DeviceConstraint",
     "DeviceAllocation",
     "torch_device",
+    "torch_cuda_uuid",
     "ConsolidateSolver",
     "SpreadSolver",
     "ReservationError",
