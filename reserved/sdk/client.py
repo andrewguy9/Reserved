@@ -97,7 +97,7 @@ class ExplicitSlot:
 
 @dataclass
 class GrantedDevice:
-    """A physical device slot granted by the daemon."""
+    """A physical device allocation granted by the daemon."""
     device_name: str  # Physical device name.
     cuda_ordinal: int  # Physical CUDA ordinal, or -1 for non-CUDA devices.
 
@@ -351,7 +351,7 @@ class Reservation:
         self.reservation_id = granted["reservation_id"]
         self.devices = [
             GrantedDevice(device_name=s["device_name"], cuda_ordinal=s["cuda_ordinal"])
-            for s in granted["slots"]
+            for s in granted["allocations"]
         ]
         if fds:
             self._lease_sock = socket.socket(fileno=fds[0])
@@ -445,16 +445,16 @@ def _parse_inherited_grants(grants_json: str | None) -> list[GrantedDevice]:
         raise ReservationError("RESERVED_GRANTED_SLOTS is missing; launch the worker with the updated reserve CLI")
 
     try:
-        slots = json.loads(grants_json)
-        if not isinstance(slots, list):
+        grants = json.loads(grants_json)
+        if not isinstance(grants, list):
             raise ValueError
 
         devices: list[GrantedDevice] = []
-        for slot in slots:
-            if not isinstance(slot, dict):
+        for grant in grants:
+            if not isinstance(grant, dict):
                 raise ValueError
-            physical_name = slot.get("device_name")
-            physical_ordinal = slot.get("cuda_ordinal")
+            physical_name = grant.get("device_name")
+            physical_ordinal = grant.get("cuda_ordinal")
             if not isinstance(physical_name, str) or type(physical_ordinal) is not int:
                 raise ValueError
             if physical_ordinal < -1:
@@ -571,7 +571,7 @@ class Request:
             res.reservation_id = granted["reservation_id"]
             res.devices = [
                 GrantedDevice(device_name=s["device_name"], cuda_ordinal=s["cuda_ordinal"])
-                for s in granted["slots"]
+                for s in granted["allocations"]
             ]
             res._lease_sock = socket.socket(fileno=fd)
             result.append(res)

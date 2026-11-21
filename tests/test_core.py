@@ -127,13 +127,13 @@ class TestMetalGrant:
         req = simple_request("infer", "metal:0", ram_mb=8192)
         new_ledger, result = grant(ledger, req)
         assert result.ok
-        assert result.reservations[0].slots[0].device_name == "metal:0"
+        assert result.reservations[0].allocations[0].device_name == "metal:0"
 
     def test_metal_cuda_ordinal_is_minus_one(self):
         ledger = load_ledger(METAL_CONFIG)
         req = simple_request("infer", "metal:0", ram_mb=8192)
         _, result = grant(ledger, req)
-        assert result.reservations[0].slots[0].cuda_ordinal == -1
+        assert result.reservations[0].allocations[0].cuda_ordinal == -1
 
     def test_metal_capacity_subtracted(self):
         ledger = load_ledger(METAL_CONFIG)
@@ -154,7 +154,7 @@ class TestMetalGrant:
         ))
         new_ledger, result = grant(ledger, req)
         assert result.ok
-        assert len(result.reservations[0].slots) == 2
+        assert len(result.reservations[0].allocations) == 2
 
     def test_metal_release(self):
         ledger = load_ledger(METAL_CONFIG)
@@ -184,8 +184,8 @@ class TestGrantSuccess:
         granted = result.reservations[0]
         assert granted.label == "train"
         assert len(granted.reservation_id) == 6
-        assert len(granted.slots) == 1
-        assert granted.slots[0].device_name == "cuda:0"
+        assert len(granted.allocations) == 1
+        assert granted.allocations[0].device_name == "cuda:0"
 
     def test_ram_subtracted_from_new_ledger(self):
         ledger = make_ledger()
@@ -215,13 +215,13 @@ class TestGrantSuccess:
         ledger = make_ledger()
         req = simple_request("infer", "cuda:2", ram_mb=4096)
         _, result = grant(ledger, req)
-        assert result.reservations[0].slots[0].cuda_ordinal == 2
+        assert result.reservations[0].allocations[0].cuda_ordinal == 2
 
     def test_cpu_cuda_ordinal_minus_one(self):
         ledger = make_ledger()
         req = simple_request("cpu-job", "cpu", ram_mb=1024)
         _, result = grant(ledger, req)
-        assert result.reservations[0].slots[0].cuda_ordinal == -1
+        assert result.reservations[0].allocations[0].cuda_ordinal == -1
 
     def test_reservation_id_is_unique(self):
         ledger = make_ledger()
@@ -413,10 +413,10 @@ class TestGrantAtomic:
         ))
         new_ledger, result = grant(ledger, req)
         assert result.ok
-        assert len(result.reservations[0].slots) == 2
+        assert len(result.reservations[0].allocations) == 2
         # cuda_ordinal should be the physical ordinal from the device name.
-        assert result.reservations[0].slots[0].cuda_ordinal == 0
-        assert result.reservations[0].slots[1].cuda_ordinal == 1
+        assert result.reservations[0].allocations[0].cuda_ordinal == 0
+        assert result.reservations[0].allocations[1].cuda_ordinal == 1
 
 
 # ---------------------------------------------------------------------------
@@ -526,9 +526,9 @@ class TestStatus:
         r = result.reservations[0]
         assert r.id == result_grant.reservations[0].reservation_id
         assert r.label == "train"
-        assert len(r.slots) == 1
-        assert r.slots[0].device_name == "cuda:0"
-        assert r.slots[0].ram_mb == 8192
+        assert len(r.allocations) == 1
+        assert r.allocations[0].device_name == "cuda:0"
+        assert r.allocations[0].ram_mb == 8192
 
     def test_status_no_reservations_initially(self):
         ledger = make_ledger()

@@ -120,12 +120,12 @@ def grant_success_to_wire(result: GrantSuccess) -> bytes:
             {
                 "reservation_id": gr.reservation_id,
                 "label": gr.label,
-                "slots": [
+                "allocations": [
                     {
                         "device_name": gs.device_name,
                         "cuda_ordinal": gs.cuda_ordinal,
                     }
-                    for gs in gr.slots
+                    for gs in gr.allocations
                 ],
             }
             for gr in result.reservations
@@ -159,13 +159,13 @@ def status_result_to_wire(result: StatusResult) -> bytes:
                 "id": r.id,
                 "label": r.label,
                 "created_at": r.created_at,
-                "slots": [
+                "allocations": [
                     {
                         "device_name": s.device_name,
                         "ram_mb": s.ram_mb,
                         "compute_units": s.compute_units,
                     }
-                    for s in r.slots
+                    for s in r.allocations
                 ],
             }
             for r in result.reservations

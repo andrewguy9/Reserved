@@ -100,7 +100,7 @@ def test_build_reserve_request_requires_status_for_constraints():
 
 def test_build_exec_env_sets_reservation_metadata_without_mutating_base_env():
     base = {"KEEP": "yes"}
-    granted_slots = [
+    granted_allocations = [
         {"device_name": "cpu:batch,worker", "cuda_ordinal": -1},
         {"device_name": "cuda:2", "cuda_ordinal": 2},
         {"device_name": "cuda:2", "cuda_ordinal": 2},
@@ -108,7 +108,7 @@ def test_build_exec_env_sets_reservation_metadata_without_mutating_base_env():
         {"device_name": "cuda:3", "cuda_ordinal": 3},
     ]
 
-    env = build_exec_env(base, granted_slots, "abc123", 9)
+    env = build_exec_env(base, granted_allocations, "abc123", 9)
 
     assert base == {"KEEP": "yes"}
     assert env["KEEP"] == "yes"
@@ -117,7 +117,7 @@ def test_build_exec_env_sets_reservation_metadata_without_mutating_base_env():
     assert env["RESERVED_DEVICE"] == "cuda:2"
     assert env["RESERVED_DEVICES"] == "cpu:batch,worker,cuda:2,cuda:2,metal:0,cuda:3"
     assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
-    assert json.loads(env["RESERVED_GRANTED_SLOTS"]) == granted_slots
+    assert json.loads(env["RESERVED_GRANTED_SLOTS"]) == granted_allocations
 
 
 def test_build_exec_env_without_cuda_slots_does_not_add_cuda_visible_devices():

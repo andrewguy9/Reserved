@@ -9,7 +9,7 @@ from reserved.core import (
     GrantFailure,
     GrantSuccess,
     GrantedReservation,
-    GrantedSlot,
+    GrantedAllocation,
     ReservationRequest,
     ReserveRequest,
     DeviceAllocation,
@@ -128,7 +128,7 @@ class TestGrantSuccessWire:
             GrantedReservation(
                 reservation_id="a3f9c2",
                 label="train",
-                slots=(GrantedSlot(device_name="cuda:0", cuda_ordinal=0),),
+                allocations=(GrantedAllocation(device_name="cuda:0", cuda_ordinal=0),),
                 created_at=1748000000.0,
             ),
         ))
@@ -146,12 +146,12 @@ class TestGrantSuccessWire:
     def test_slot_device_name(self):
         data = grant_success_to_wire(self._make_success())
         obj = json.loads(data)
-        assert obj["reservations"][0]["slots"][0]["device_name"] == "cuda:0"
+        assert obj["reservations"][0]["allocations"][0]["device_name"] == "cuda:0"
 
     def test_slot_cuda_ordinal(self):
         data = grant_success_to_wire(self._make_success())
         obj = json.loads(data)
-        assert obj["reservations"][0]["slots"][0]["cuda_ordinal"] == 0
+        assert obj["reservations"][0]["allocations"][0]["cuda_ordinal"] == 0
 
 
 class TestGrantFailureWire:
@@ -182,8 +182,8 @@ class TestStatusResultWire:
                     id="a3f9c2",
                     label="train",
                     created_at=1748000000.0,
-                    slots=(
-                        ActiveReservation.ClaimedSlot(
+                    allocations=(
+                        ActiveReservation.ClaimedAllocation(
                             device_name="cuda:0",
                             ram_mb=8192,
                             compute_units=50,
@@ -207,8 +207,8 @@ class TestStatusResultWire:
         r = obj["reservations"][0]
         assert r["id"] == "a3f9c2"
         assert r["label"] == "train"
-        assert r["slots"][0]["device_name"] == "cuda:0"
-        assert r["slots"][0]["ram_mb"] == 8192
+        assert r["allocations"][0]["device_name"] == "cuda:0"
+        assert r["allocations"][0]["ram_mb"] == 8192
 
 
 class TestParseErrors:

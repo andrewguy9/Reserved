@@ -55,8 +55,8 @@ class ReserveRequest:
 
 
 @dataclass(frozen=True)
-class GrantedSlot:
-    """One granted slot in a successful reservation."""
+class GrantedAllocation:
+    """One granted allocation in a successful reservation."""
     device_name: str  # Physical device name.
     cuda_ordinal: int  # Physical CUDA ordinal, or -1 for non-CUDA devices.
 
@@ -65,7 +65,7 @@ class GrantedSlot:
 class GrantedReservation:
     reservation_id: str
     label: str
-    slots: tuple[GrantedSlot, ...]
+    allocations: tuple[GrantedAllocation, ...]
     created_at: float
 
 
@@ -74,14 +74,14 @@ class ActiveReservation:
     """Tracks a live reservation in the ledger — includes the claimed resources."""
 
     @dataclass(frozen=True)
-    class ClaimedSlot:
+    class ClaimedAllocation:
         device_name: str  # Physical device name.
         ram_mb: int
         compute_units: int
 
     reservation_id: str
     label: str
-    slots: tuple[ActiveReservation.ClaimedSlot, ...]
+    allocations: tuple[ActiveReservation.ClaimedAllocation, ...]
     created_at: float
 
 
@@ -126,7 +126,7 @@ class ReservationStatus:
     id: str
     label: str
     created_at: float
-    slots: tuple[ActiveReservation.ClaimedSlot, ...]
+    allocations: tuple[ActiveReservation.ClaimedAllocation, ...]
 
 
 @dataclass(frozen=True)
@@ -239,8 +239,8 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
     for res_req in request.reservations:
         reservation_id = secrets.token_hex(3)  # 6 hex chars
 
-        granted_slots: list[GrantedSlot] = []
-        claimed_slots: list[ActiveReservation.ClaimedSlot] = []
+        granted_allocations: list[GrantedAllocation] = []
+        claimed_allocations: list[ActiveReservation.ClaimedAllocation] = []
 
         for allocation in res_req.allocations:
             i = idx[allocation.name]
@@ -250,11 +250,11 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
                 cuda_ordinal = int(allocation.name.split(":")[1])
             else:
                 cuda_ordinal = -1
-            granted_slots.append(GrantedSlot(
+            granted_allocations.append(GrantedAllocation(
                 device_name=allocation.name,
                 cuda_ordinal=cuda_ordinal,
             ))
-            claimed_slots.append(ActiveReservation.ClaimedSlot(
+            claimed_allocations.append(ActiveReservation.ClaimedAllocation(
                 device_name=allocation.name,
                 ram_mb=allocation.ram_mb,
                 compute_units=allocation.compute_units,
@@ -263,13 +263,13 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
         granted_reservations.append(GrantedReservation(
             reservation_id=reservation_id,
             label=res_req.label,
-            slots=tuple(granted_slots),
+            allocations=tuple(granted_allocations),
             created_at=now,
         ))
         active_reservations.append(ActiveReservation(
             reservation_id=reservation_id,
             label=res_req.label,
-            slots=tuple(claimed_slots),
+            allocations=tuple(claimed_allocations),
             created_at=now,
         ))
 
@@ -301,7 +301,7 @@ def release(ledger: Ledger, reservation_id: str) -> Ledger:
     idx = _availability_index(ledger)
     avail = list(ledger.availability)
 
-    for claimed in target.slots:
+    for claimed in target.allocations:
         if claimed.device_name not in idx:
             continue
         i = idx[claimed.device_name]
@@ -337,7 +337,7 @@ def status(ledger: Ledger) -> StatusResult:
             id=ar.reservation_id,
             label=ar.label,
             created_at=ar.created_at,
-            slots=ar.slots,
+            allocations=ar.allocations,
         )
         for ar in ledger.reservations
     )

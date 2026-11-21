@@ -282,7 +282,7 @@ def test_lease_close_releases_only_the_matching_reservation():
     assert {r.reservation_id for r in next_state.ledger.reservations} == {second_lease}
     assert available_ram(next_state.ledger, "cuda:0") == (
         available_ram(reserved_state.ledger, "cuda:0")
-        + first_reservation.slots[0].ram_mb
+        + first_reservation.allocations[0].ram_mb
     )
 
     restored_state, effects = step(next_state, LeaseClosed(second_lease))

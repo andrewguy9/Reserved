@@ -107,21 +107,21 @@ def build_reserve_request(
 
 def build_exec_env(
     base_env: dict[str, str],
-    granted_slots: list[dict],
+    granted_allocations: list[dict],
     reservation_id: str,
     lease_fd: int | None,
 ) -> dict[str, str]:
     """Pass physical grants and CUDA visibility to the child process."""
     seen: set[str] = set()
     physical_cuda_ordinals: list[str] = []
-    for s in granted_slots:
+    for s in granted_allocations:
         if s["cuda_ordinal"] >= 0:
             physical_ordinal = str(s["cuda_ordinal"])
             if physical_ordinal not in seen:
                 seen.add(physical_ordinal)
                 physical_cuda_ordinals.append(physical_ordinal)
 
-    physical_names = [s["device_name"] for s in granted_slots]
+    physical_names = [s["device_name"] for s in granted_allocations]
     first_accel = next(
         (name for name in physical_names if not name.startswith("cpu")),
         physical_names[0] if physical_names else "",
@@ -132,8 +132,8 @@ def build_exec_env(
         env["CUDA_VISIBLE_DEVICES"] = ",".join(physical_cuda_ordinals)
     env["RESERVED_DEVICE"] = first_accel
     env["RESERVED_DEVICES"] = ",".join(physical_names)
-    # Preserve slot boundaries even when a configured name contains a comma.
-    env["RESERVED_GRANTED_SLOTS"] = json.dumps(granted_slots, separators=(",", ":"))
+    # Preserve allocation boundaries even when a configured name contains a comma.
+    env["RESERVED_GRANTED_SLOTS"] = json.dumps(granted_allocations, separators=(",", ":"))
     env["RESERVED_ID"] = reservation_id
     if lease_fd is not None:
         env["RESERVED_FD"] = str(lease_fd)
@@ -203,12 +203,12 @@ def main(argv: list[str] | None = None) -> None:
 
     granted = resp["reservations"][0]
     reservation_id = granted["reservation_id"]
-    granted_slots = granted["slots"]
+    granted_allocations = granted["allocations"]
 
     # We have exactly one lease fd.
     lease_fd = fds[0] if fds else None
 
-    env = build_exec_env(os.environ, granted_slots, reservation_id, lease_fd)
+    env = build_exec_env(os.environ, granted_allocations, reservation_id, lease_fd)
     if lease_fd is not None:
         # Clear FD_CLOEXEC so CMD inherits the lease fd across exec.
         os.set_inheritable(lease_fd, True)

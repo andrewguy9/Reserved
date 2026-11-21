@@ -54,7 +54,7 @@ def _format_human(status: dict) -> str:
             age = int(now - r.get("created_at", now))
             age_str = f"{age // 60}m{age % 60}s"
             lines.append(f"  {r['id']}  label={r['label']}  age={age_str}")
-            for s in r.get("slots", []):
+            for s in r.get("allocations", []):
                 cu_str = f"  {s['compute_units']} compute" if s.get("compute_units") else ""
                 lines.append(f"    {s['device_name']}  {s['ram_mb']} MB{cu_str}")
     return "\n".join(lines)
