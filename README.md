@@ -202,7 +202,7 @@ configs and a PyTorch worker for one or two cards.
 | `CUDA_VISIBLE_DEVICES` | Distinct physical CUDA ordinals in first-grant order, defining the child's CUDA view |
 | `RESERVED_DEVICE` | Physical name of the first granted accelerator, or the first device for a CPU-only grant |
 | `RESERVED_DEVICES` | Comma-separated physical device names in grant order |
-| `RESERVED_GRANTED_SLOTS` | JSON array of physical grant metadata for SDK adoption |
+| `RESERVED_GRANTED_ALLOCATIONS` | JSON array of granted allocations (`name`, `ram_mb`, `compute_units`) for SDK adoption |
 | `RESERVED_ID` | Reservation ID |
 | `RESERVED_FD` | File descriptor number of the lease fd |
 
@@ -303,7 +303,7 @@ executable cannot accidentally keep the grant alive. A forked child still
 gets a copy, so capacity returns when the last copy closes.
 
 The adopted reservation exposes `reservation_id` from `RESERVED_ID` and
-physical grants from `RESERVED_GRANTED_SLOTS`. Update the `reserve` launcher
+physical grants from `RESERVED_GRANTED_ALLOCATIONS`. Update the `reserve` launcher
 and the worker SDK together. Adoption requires this grant metadata and
 accepts an empty array for a reservation with zero slots.
 See the [getting-started walkthrough](GETTING_STARTED.md#adopt-the-lease-in-a-python-worker).
@@ -315,7 +315,7 @@ metadata for placement and diagnostics. Pass the result of
 `reservation.torch_devices()` to PyTorch. It returns one process-local device
 per granted slot, in grant order. For example, with `CUDA_VISIBLE_DEVICES=5,2`,
 physical `cuda:2` becomes logical `cuda:1`. When the mask is unset, the
-helper uses the physical ordinal as the PyTorch index.
+helper uses the ordinal from the device name as the PyTorch index.
 
 Set CUDA visibility before CUDA initializes. The SDK accepts masks made of
 distinct nonnegative decimal ordinals. An empty mask or `-1` hides all CUDA

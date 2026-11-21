@@ -85,11 +85,11 @@ Line-delimited JSON over a Unix domain socket. Each message is one JSON object t
   "reservations": [
     {
       "label": "checkpoint",
-      "slots": [{ "name": "cuda:2", "ram_mb": 8192, "compute_units": 50 }]
+      "allocations": [{ "name": "cuda:2", "ram_mb": 8192, "compute_units": 50 }]
     },
     {
       "label": "lora",
-      "slots": [{ "name": "cuda:2", "ram_mb": 2048, "compute_units": 0 }]
+      "allocations": [{ "name": "cuda:2", "ram_mb": 2048, "compute_units": 0 }]
     }
   ]
 }
@@ -104,19 +104,22 @@ Line-delimited JSON over a Unix domain socket. Each message is one JSON object t
     {
       "reservation_id": "a3f9c2",
       "label": "checkpoint",
-      "slots": [{ "device_name": "cuda:2", "cuda_ordinal": 2 }]
+      "allocations": [{ "name": "cuda:2", "ram_mb": 8192, "compute_units": 50 }]
     },
     {
       "reservation_id": "b7e1d4",
       "label": "lora",
-      "slots": [{ "device_name": "cuda:2", "cuda_ordinal": 2 }]
+      "allocations": [{ "name": "cuda:2", "ram_mb": 2048, "compute_units": 0 }]
     }
   ]
 }
 ```
 
-`device_name` identifies the physical grant. `cuda_ordinal` is its physical
-CUDA ordinal (for example, `2` for `cuda:2`) or `-1` for a non-CUDA grant.
+Each granted allocation is the requested record echoed back: the same
+`name`, `ram_mb`, and `compute_units`. The name is the physical identity of
+the device. For CUDA it is `cuda:N`, where `N` is the ordinal the driver
+understands in `CUDA_VISIBLE_DEVICES`; clients derive the ordinal from the
+name rather than receiving it separately.
 
 **Reserve response (failure):**
 
@@ -188,13 +191,13 @@ Physical device names identify hardware in the config, CLI `name=` slots,
 solver, ledger, protocol, and SDK grant metadata. For example,
 `reserve infer name=cuda:2 -- python infer.py` claims physical `cuda:2`.
 The CLI exports that name in `RESERVED_DEVICE` and `RESERVED_DEVICES`, and
-passes the physical grant metadata in `RESERVED_GRANTED_SLOTS` for SDK
+passes the granted allocations in `RESERVED_GRANTED_ALLOCATIONS` for SDK
 adoption. `CUDA_VISIBLE_DEVICES=2` exposes the granted GPU to the worker.
 Multiple CUDA slots contribute distinct physical ordinals in first-grant order.
 
-`GrantedDevice.torch_device()` is the conversion boundary. It maps the
-physical ordinal to its zero-based position in the current process's CUDA
-mask. The worker above gets `torch.device("cuda:0")`. A process with
+`GrantedDevice.torch_device()` is the conversion boundary. It reads the
+physical ordinal from the device name and maps it to its zero-based position
+in the current process's CUDA mask. The worker above gets `torch.device("cuda:0")`. A process with
 `CUDA_VISIBLE_DEVICES=5,2` gets `torch.device("cuda:1")` for the same physical
 grant. `Reservation.torch_devices()` applies the conversion in grant order.
 Multiple slots on the same GPU resolve to the same logical index.

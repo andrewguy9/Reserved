@@ -95,6 +95,12 @@ class TestLoadLedger:
         with pytest.raises(ValueError, match="non-negative"):
             load_ledger(cfg)
 
+    def test_invalid_cuda_name_signed_or_non_ascii_ordinal(self):
+        for name in ("cuda:+1", "cuda: 1", "cuda:\u0662", "cuda:1:0"):
+            cfg = {"devices": [{"name": name, "type": "cuda", "ram_mb": 8192}]}
+            with pytest.raises(ValueError, match="invalid CUDA device name"):
+                load_ledger(cfg)
+
     def test_non_cuda_names_not_validated(self):
         cfg = {"devices": [
             {"name": "metal:0", "type": "metal", "ram_mb": 16384},
@@ -127,13 +133,7 @@ class TestMetalGrant:
         req = simple_request("infer", "metal:0", ram_mb=8192)
         new_ledger, result = grant(ledger, req)
         assert result.ok
-        assert result.reservations[0].allocations[0].device_name == "metal:0"
-
-    def test_metal_cuda_ordinal_is_minus_one(self):
-        ledger = load_ledger(METAL_CONFIG)
-        req = simple_request("infer", "metal:0", ram_mb=8192)
-        _, result = grant(ledger, req)
-        assert result.reservations[0].allocations[0].cuda_ordinal == -1
+        assert result.reservations[0].allocations[0].name == "metal:0"
 
     def test_metal_capacity_subtracted(self):
         ledger = load_ledger(METAL_CONFIG)
@@ -185,7 +185,7 @@ class TestGrantSuccess:
         assert granted.label == "train"
         assert len(granted.reservation_id) == 6
         assert len(granted.allocations) == 1
-        assert granted.allocations[0].device_name == "cuda:0"
+        assert granted.allocations[0].name == "cuda:0"
 
     def test_ram_subtracted_from_new_ledger(self):
         ledger = make_ledger()
@@ -211,17 +211,14 @@ class TestGrantSuccess:
         _, _ = grant(ledger, req)
         assert ledger.availability[0].available_ram_mb == original_ram
 
-    def test_cuda_ordinal_in_response(self):
+    def test_grant_echoes_requested_allocations(self):
         ledger = make_ledger()
-        req = simple_request("infer", "cuda:2", ram_mb=4096)
+        req = simple_request("infer", "cuda:2", ram_mb=4096, compute_units=10)
         _, result = grant(ledger, req)
-        assert result.reservations[0].allocations[0].cuda_ordinal == 2
-
-    def test_cpu_cuda_ordinal_minus_one(self):
-        ledger = make_ledger()
-        req = simple_request("cpu-job", "cpu", ram_mb=1024)
-        _, result = grant(ledger, req)
-        assert result.reservations[0].allocations[0].cuda_ordinal == -1
+        assert result.reservations[0].allocations == req.reservations[0].allocations
+        assert result.reservations[0].allocations == (
+            DeviceAllocation(name="cuda:2", ram_mb=4096, compute_units=10),
+        )
 
     def test_reservation_id_is_unique(self):
         ledger = make_ledger()
@@ -413,10 +410,8 @@ class TestGrantAtomic:
         ))
         new_ledger, result = grant(ledger, req)
         assert result.ok
-        assert len(result.reservations[0].allocations) == 2
-        # cuda_ordinal should be the physical ordinal from the device name.
-        assert result.reservations[0].allocations[0].cuda_ordinal == 0
-        assert result.reservations[0].allocations[1].cuda_ordinal == 1
+        assert result.reservations[0].allocations == req.reservations[0].allocations
+        assert [a.name for a in result.reservations[0].allocations] == ["cuda:0", "cuda:1"]
 
 
 # ---------------------------------------------------------------------------

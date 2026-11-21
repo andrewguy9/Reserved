@@ -35,7 +35,11 @@ class DeviceAvailability:
 
 @dataclass(frozen=True)
 class DeviceAllocation:
-    """An explicit device allocation sent to the daemon: this device, these resources."""
+    """An explicit device allocation: this device, these resources.
+
+    Clients send it in a reserve request, and a successful grant returns the
+    same record for each allocation it holds.
+    """
     name: str          # physical device name, e.g. "cuda:0"
     ram_mb: int = 0
     compute_units: int = 0
@@ -55,17 +59,10 @@ class ReserveRequest:
 
 
 @dataclass(frozen=True)
-class GrantedAllocation:
-    """One granted allocation in a successful reservation."""
-    device_name: str  # Physical device name.
-    cuda_ordinal: int  # Physical CUDA ordinal, or -1 for non-CUDA devices.
-
-
-@dataclass(frozen=True)
 class GrantedReservation:
     reservation_id: str
     label: str
-    allocations: tuple[GrantedAllocation, ...]
+    allocations: tuple[DeviceAllocation, ...]
     created_at: float
 
 
@@ -139,24 +136,28 @@ class StatusResult:
 # Functions
 # ---------------------------------------------------------------------------
 
+def cuda_ordinal(name: str) -> int:
+    """Return the physical CUDA ordinal N encoded in a ``cuda:N`` device name.
+
+    The name is the only identity a CUDA device has: the ordinal is what the
+    driver understands in ``CUDA_VISIBLE_DEVICES``. Only a non-negative ASCII
+    decimal ordinal is accepted. Raises ValueError for any other name,
+    including non-CUDA names.
+    """
+    kind, sep, ordinal_text = name.partition(":")
+    if kind != "cuda" or not sep or ":" in ordinal_text:
+        raise ValueError(f"invalid CUDA device name {name!r}: must be 'cuda:N'")
+    if not (ordinal_text.isascii() and ordinal_text.isdecimal()):
+        raise ValueError(
+            f"invalid CUDA device name {name!r}: ordinal must be a non-negative integer"
+        )
+    return int(ordinal_text)
+
+
 def _validate_device_name(name: str, device_type: str) -> None:
     """Raise ValueError if a device name is invalid for its type."""
     if device_type == "cuda":
-        parts = name.split(":")
-        if len(parts) != 2 or parts[0] != "cuda":
-            raise ValueError(
-                f"invalid CUDA device name {name!r}: must be 'cuda:N'"
-            )
-        try:
-            ordinal = int(parts[1])
-        except ValueError:
-            raise ValueError(
-                f"invalid CUDA device name {name!r}: ordinal must be an integer"
-            )
-        if ordinal < 0:
-            raise ValueError(
-                f"invalid CUDA device name {name!r}: ordinal must be non-negative"
-            )
+        cuda_ordinal(name)
 
 
 def load_ledger(config: dict) -> Ledger:
@@ -239,37 +240,26 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
     for res_req in request.reservations:
         reservation_id = secrets.token_hex(3)  # 6 hex chars
 
-        granted_allocations: list[GrantedAllocation] = []
-        claimed_allocations: list[ActiveReservation.ClaimedAllocation] = []
-
-        for allocation in res_req.allocations:
-            i = idx[allocation.name]
-            dev = avail[i].device
-            if dev.type == "cuda":
-                # Name is guaranteed valid by load_ledger validation.
-                cuda_ordinal = int(allocation.name.split(":")[1])
-            else:
-                cuda_ordinal = -1
-            granted_allocations.append(GrantedAllocation(
-                device_name=allocation.name,
-                cuda_ordinal=cuda_ordinal,
-            ))
-            claimed_allocations.append(ActiveReservation.ClaimedAllocation(
+        claimed_allocations = tuple(
+            ActiveReservation.ClaimedAllocation(
                 device_name=allocation.name,
                 ram_mb=allocation.ram_mb,
                 compute_units=allocation.compute_units,
-            ))
+            )
+            for allocation in res_req.allocations
+        )
 
+        # The grant echoes the explicit allocations exactly as requested.
         granted_reservations.append(GrantedReservation(
             reservation_id=reservation_id,
             label=res_req.label,
-            allocations=tuple(granted_allocations),
+            allocations=res_req.allocations,
             created_at=now,
         ))
         active_reservations.append(ActiveReservation(
             reservation_id=reservation_id,
             label=res_req.label,
-            allocations=tuple(claimed_allocations),
+            allocations=claimed_allocations,
             created_at=now,
         ))
 

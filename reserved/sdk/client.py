@@ -7,7 +7,7 @@ Public API:
   Request(*reservations, socket_path=None)
   DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)
   ExplicitSlot(name, *, ram_mb=0, compute_units=0)
-  GrantedDevice(device_name, cuda_ordinal)
+  GrantedDevice(device_name)
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from reserved.core import (
     DeviceAllocation,
     ReservationRequest,
     ReserveRequest,
+    cuda_ordinal,
 )
 from reserved.paths import client_socket_override as _get_socket_override, client_socket_paths
 from reserved.sdk.errors import (
@@ -98,8 +99,7 @@ class ExplicitSlot:
 @dataclass
 class GrantedDevice:
     """A physical device allocation granted by the daemon."""
-    device_name: str  # Physical device name.
-    cuda_ordinal: int  # Physical CUDA ordinal, or -1 for non-CUDA devices.
+    device_name: str  # Physical device name, e.g. "cuda:2".
 
     def torch_device(self) -> Any:
         """Return the process-local PyTorch device for this physical grant.
@@ -109,9 +109,9 @@ class GrantedDevice:
         unsupported device kinds raise ReservationError.
         """
         device_type = self.device_name.partition(":")[0]
-        if self.cuda_ordinal >= 0:
+        if device_type == "cuda":
             logical_index = _logical_cuda_index(
-                self.device_name, self.cuda_ordinal, os.environ.get("CUDA_VISIBLE_DEVICES"),
+                self.device_name, os.environ.get("CUDA_VISIBLE_DEVICES"),
             )
             torch_name = f"cuda:{logical_index}"
         elif device_type == "metal":
@@ -125,7 +125,11 @@ class GrantedDevice:
         return torch.device(torch_name)
 
 
-def _logical_cuda_index(physical_name: str, physical_ordinal: int, mask: str | None) -> int:
+def _logical_cuda_index(physical_name: str, mask: str | None) -> int:
+    try:
+        physical_ordinal = cuda_ordinal(physical_name)
+    except ValueError as exc:
+        raise ReservationError(str(exc)) from exc
     if mask is None:
         return physical_ordinal
 
@@ -350,8 +354,8 @@ class Reservation:
         granted = resp["reservations"][0]
         self.reservation_id = granted["reservation_id"]
         self.devices = [
-            GrantedDevice(device_name=s["device_name"], cuda_ordinal=s["cuda_ordinal"])
-            for s in granted["allocations"]
+            GrantedDevice(device_name=a["name"])
+            for a in granted["allocations"]
         ]
         if fds:
             self._lease_sock = socket.socket(fileno=fds[0])
@@ -442,7 +446,7 @@ def _wrap_inherited_lease(fd_text: str) -> socket.socket:
 
 def _parse_inherited_grants(grants_json: str | None) -> list[GrantedDevice]:
     if grants_json is None:
-        raise ReservationError("RESERVED_GRANTED_SLOTS is missing; launch the worker with the updated reserve CLI")
+        raise ReservationError("RESERVED_GRANTED_ALLOCATIONS is missing; launch the worker with the updated reserve CLI")
 
     try:
         grants = json.loads(grants_json)
@@ -453,20 +457,15 @@ def _parse_inherited_grants(grants_json: str | None) -> list[GrantedDevice]:
         for grant in grants:
             if not isinstance(grant, dict):
                 raise ValueError
-            physical_name = grant.get("device_name")
-            physical_ordinal = grant.get("cuda_ordinal")
-            if not isinstance(physical_name, str) or type(physical_ordinal) is not int:
+            physical_name = grant.get("name")
+            if not isinstance(physical_name, str):
                 raise ValueError
-            if physical_ordinal < -1:
-                raise ValueError
-            if physical_ordinal >= 0:
-                kind, _, ordinal_text = physical_name.partition(":")
-                if kind != "cuda" or int(ordinal_text) != physical_ordinal:
-                    raise ValueError
-            devices.append(GrantedDevice(physical_name, physical_ordinal))
+            if physical_name.partition(":")[0] == "cuda":
+                cuda_ordinal(physical_name)  # reject a CUDA name the driver cannot address
+            devices.append(GrantedDevice(physical_name))
         return devices
     except (RecursionError, ValueError) as exc:
-        raise ReservationError("RESERVED_GRANTED_SLOTS contains invalid physical grant metadata") from exc
+        raise ReservationError("RESERVED_GRANTED_ALLOCATIONS contains invalid grant metadata") from exc
 
 
 def adopt_inherited_lease() -> Reservation:
@@ -475,7 +474,7 @@ def adopt_inherited_lease() -> Reservation:
     Use the returned reservation as a context manager or release it explicitly.
     This claims the existing lease once, clears ``RESERVED_FD``, and marks the
     descriptor close-on-exec. The reservation carries the physical grants
-    from ``RESERVED_GRANTED_SLOTS`` and the launcher ID when available.
+    from ``RESERVED_GRANTED_ALLOCATIONS`` and the launcher ID when available.
 
     Raises ReservationError for a missing or invalid descriptor or grant
     metadata, and InheritedLeaseAlreadyAdoptedError if the handoff was already
@@ -492,7 +491,7 @@ def adopt_inherited_lease() -> Reservation:
 
         reservation = Reservation("inherited")
         reservation.reservation_id = os.environ.get("RESERVED_ID")
-        reservation.devices = _parse_inherited_grants(os.environ.get("RESERVED_GRANTED_SLOTS"))
+        reservation.devices = _parse_inherited_grants(os.environ.get("RESERVED_GRANTED_ALLOCATIONS"))
         reservation._inherited = True
         reservation._lease_sock = _wrap_inherited_lease(fd_text)
         _inherited_lease_adopted = True
@@ -570,8 +569,8 @@ class Request:
         for res, granted, fd in zip(self._reservations, granted_list, fds):
             res.reservation_id = granted["reservation_id"]
             res.devices = [
-                GrantedDevice(device_name=s["device_name"], cuda_ordinal=s["cuda_ordinal"])
-                for s in granted["allocations"]
+                GrantedDevice(device_name=a["name"])
+                for a in granted["allocations"]
             ]
             res._lease_sock = socket.socket(fileno=fd)
             result.append(res)

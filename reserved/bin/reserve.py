@@ -13,7 +13,7 @@ if _here not in sys.path:
     sys.path.insert(0, _here)
 
 from reserved.cli import parse_options, usage_error
-from reserved.core import DeviceAllocation, ReservationRequest, ReserveRequest
+from reserved.core import DeviceAllocation, ReservationRequest, ReserveRequest, cuda_ordinal
 from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import (
     DeviceConstraint,
@@ -111,17 +111,15 @@ def build_exec_env(
     reservation_id: str,
     lease_fd: int | None,
 ) -> dict[str, str]:
-    """Pass physical grants and CUDA visibility to the child process."""
-    seen: set[str] = set()
+    """Pass granted allocations and CUDA visibility to the child process."""
+    physical_names = [a["name"] for a in granted_allocations]
     physical_cuda_ordinals: list[str] = []
-    for s in granted_allocations:
-        if s["cuda_ordinal"] >= 0:
-            physical_ordinal = str(s["cuda_ordinal"])
-            if physical_ordinal not in seen:
-                seen.add(physical_ordinal)
-                physical_cuda_ordinals.append(physical_ordinal)
+    for name in physical_names:
+        if name.partition(":")[0] == "cuda":
+            ordinal = str(cuda_ordinal(name))
+            if ordinal not in physical_cuda_ordinals:
+                physical_cuda_ordinals.append(ordinal)
 
-    physical_names = [s["device_name"] for s in granted_allocations]
     first_accel = next(
         (name for name in physical_names if not name.startswith("cpu")),
         physical_names[0] if physical_names else "",
@@ -133,7 +131,7 @@ def build_exec_env(
     env["RESERVED_DEVICE"] = first_accel
     env["RESERVED_DEVICES"] = ",".join(physical_names)
     # Preserve allocation boundaries even when a configured name contains a comma.
-    env["RESERVED_GRANTED_SLOTS"] = json.dumps(granted_allocations, separators=(",", ":"))
+    env["RESERVED_GRANTED_ALLOCATIONS"] = json.dumps(granted_allocations, separators=(",", ":"))
     env["RESERVED_ID"] = reservation_id
     if lease_fd is not None:
         env["RESERVED_FD"] = str(lease_fd)

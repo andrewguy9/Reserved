@@ -22,7 +22,7 @@ from reserved.sdk import client
 def handoff(monkeypatch):
     monkeypatch.setattr(client, "_inherited_lease_adopted", False)
     monkeypatch.delenv("RESERVED_FD", raising=False)
-    monkeypatch.setenv("RESERVED_GRANTED_SLOTS", "[]")
+    monkeypatch.setenv("RESERVED_GRANTED_ALLOCATIONS", "[]")
     monkeypatch.setenv("RESERVED_ID", "inherited-id")
 
     def publish(fd):
@@ -90,9 +90,9 @@ def test_missing_grant_metadata_leaves_inherited_descriptor_unclaimed(handoff, m
         fd = worker.fileno()
         worker.set_inheritable(True)
         handoff(fd)
-        monkeypatch.delenv("RESERVED_GRANTED_SLOTS")
+        monkeypatch.delenv("RESERVED_GRANTED_ALLOCATIONS")
 
-        with pytest.raises(sdk.ReservationError, match="RESERVED_GRANTED_SLOTS is missing"):
+        with pytest.raises(sdk.ReservationError, match="RESERVED_GRANTED_ALLOCATIONS is missing"):
             adopted = sdk.adopt_inherited_lease()
             worker.detach()
             adopted.release()
@@ -108,11 +108,12 @@ def test_invalid_grant_metadata_leaves_inherited_descriptor_unclaimed(handoff, m
         handoff(fd)
         for malformed in (
             "", "null", "[{}]",
-            '[{"device_name":"cuda:2","cuda_ordinal":true}]',
-            '[{"device_name":"cuda:2","cuda_ordinal":5}]',
+            '[{"device_name":"cuda:2"}]',
+            '[{"name":2}]',
+            '[{"name":"cuda:gpu"}]',
         ):
-            monkeypatch.setenv("RESERVED_GRANTED_SLOTS", malformed)
-            with pytest.raises(sdk.ReservationError, match="RESERVED_GRANTED_SLOTS"):
+            monkeypatch.setenv("RESERVED_GRANTED_ALLOCATIONS", malformed)
+            with pytest.raises(sdk.ReservationError, match="RESERVED_GRANTED_ALLOCATIONS"):
                 sdk.adopt_inherited_lease()
             assert os.environ["RESERVED_FD"] == str(fd)
             os.fstat(fd)
@@ -215,8 +216,8 @@ def test_sdk_keeps_physical_grant_order_with_reordered_cuda_visibility(daemon_en
         sdk.ExplicitSlot("cuda:2"), socket_path=daemon_env["RESERVED_SOCKET"],
     ) as lease:
         assert lease.devices == [
-            sdk.GrantedDevice("cuda:2", 2), sdk.GrantedDevice("cuda:5", 5),
-            sdk.GrantedDevice("cuda:2", 2),
+            sdk.GrantedDevice("cuda:2"), sdk.GrantedDevice("cuda:5"),
+            sdk.GrantedDevice("cuda:2"),
         ]
         assert lease.torch_devices() == ["cuda:1", "cuda:0", "cuda:1"]
 
@@ -237,7 +238,7 @@ def _run_single_cuda_worker():
     assert os.environ["RESERVED_DEVICES"] == "cuda:2"
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "2"
     with sdk.adopt_inherited_lease() as lease:
-        assert lease.devices == [sdk.GrantedDevice(device_name="cuda:2", cuda_ordinal=2)]
+        assert lease.devices == [sdk.GrantedDevice(device_name="cuda:2")]
         assert lease.torch_devices() == ["cuda:0"]
 
 
@@ -258,8 +259,8 @@ def _run_repeated_cuda_worker():
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "5,2"
     with sdk.adopt_inherited_lease() as lease:
         assert lease.devices == [
-            sdk.GrantedDevice("cuda:5", 5), sdk.GrantedDevice("cuda:2", 2),
-            sdk.GrantedDevice("cuda:5", 5),
+            sdk.GrantedDevice("cuda:5"), sdk.GrantedDevice("cuda:2"),
+            sdk.GrantedDevice("cuda:5"),
         ]
         assert lease.torch_devices() == ["cuda:0", "cuda:1", "cuda:0"]
 
@@ -276,7 +277,7 @@ def _run_launched_worker(mode):
     reservation = sdk.adopt_inherited_lease()
     assert isinstance(reservation, sdk.Reservation)
     assert reservation.reservation_id == reservation_id
-    assert reservation.devices == [sdk.GrantedDevice("cpu", -1)]
+    assert reservation.devices == [sdk.GrantedDevice("cpu")]
     assert "RESERVED_FD" not in os.environ
     assert not os.get_inheritable(fd)
 

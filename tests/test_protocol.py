@@ -9,7 +9,6 @@ from reserved.core import (
     GrantFailure,
     GrantSuccess,
     GrantedReservation,
-    GrantedAllocation,
     ReservationRequest,
     ReserveRequest,
     DeviceAllocation,
@@ -128,7 +127,7 @@ class TestGrantSuccessWire:
             GrantedReservation(
                 reservation_id="a3f9c2",
                 label="train",
-                allocations=(GrantedAllocation(device_name="cuda:0", cuda_ordinal=0),),
+                allocations=(DeviceAllocation(name="cuda:0", ram_mb=8192, compute_units=50),),
                 created_at=1748000000.0,
             ),
         ))
@@ -143,15 +142,12 @@ class TestGrantSuccessWire:
         obj = json.loads(data)
         assert obj["reservations"][0]["reservation_id"] == "a3f9c2"
 
-    def test_slot_device_name(self):
+    def test_granted_allocation_matches_request_encoding(self):
         data = grant_success_to_wire(self._make_success())
         obj = json.loads(data)
-        assert obj["reservations"][0]["allocations"][0]["device_name"] == "cuda:0"
-
-    def test_slot_cuda_ordinal(self):
-        data = grant_success_to_wire(self._make_success())
-        obj = json.loads(data)
-        assert obj["reservations"][0]["allocations"][0]["cuda_ordinal"] == 0
+        assert obj["reservations"][0]["allocations"] == [
+            {"name": "cuda:0", "ram_mb": 8192, "compute_units": 50},
+        ]
 
 
 class TestGrantFailureWire:

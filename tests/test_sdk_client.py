@@ -31,8 +31,8 @@ def test_cpu_and_metal_pytorch_devices_ignore_cuda_visibility(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=str))
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
 
-    assert GrantedDevice("metal:0", -1).torch_device() == "mps"
-    assert GrantedDevice("cpu", -1).torch_device() == "cpu"
+    assert GrantedDevice("metal:0").torch_device() == "mps"
+    assert GrantedDevice("cpu").torch_device() == "cpu"
 
 
 @pytest.mark.parametrize(("cuda_visibility", "logical_device"), [
@@ -49,11 +49,10 @@ def test_same_physical_cuda_grant_maps_to_the_process_local_device(
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", cuda_visibility)
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=str))
 
-    physical_grant = GrantedDevice(device_name="cuda:2", cuda_ordinal=2)
+    physical_grant = GrantedDevice(device_name="cuda:2")
 
     assert physical_grant.torch_device() == logical_device
     assert physical_grant.device_name == "cuda:2"
-    assert physical_grant.cuda_ordinal == 2
 
 
 @pytest.mark.parametrize(("mask", "reason"), [
@@ -73,7 +72,7 @@ def test_granted_device_rejects_hidden_or_ambiguous_cuda_mapping(monkeypatch, ma
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=str))
 
     with pytest.raises(ReservationError, match=reason) as error:
-        GrantedDevice("cuda:2", 2).torch_device()
+        GrantedDevice("cuda:2").torch_device()
 
     assert "'cuda:2'" in str(error.value)
     assert f"CUDA_VISIBLE_DEVICES={mask!r}" in str(error.value)
@@ -83,7 +82,15 @@ def test_granted_device_rejects_unsupported_torch_device(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=str))
 
     with pytest.raises(ReservationError, match="fpga:0"):
-        GrantedDevice("fpga:0", -1).torch_device()
+        GrantedDevice("fpga:0").torch_device()
+
+
+def test_granted_device_rejects_malformed_cuda_name(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=str))
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    with pytest.raises(ReservationError, match="invalid CUDA device name"):
+        GrantedDevice("cuda:gpu").torch_device()
 
 
 def test_reservation_release_closes_lease_socket_and_is_idempotent():
