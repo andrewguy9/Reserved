@@ -12,7 +12,6 @@ DEVICES = [
     {
         "name": "cuda:GPU-00000000-0000-0000-0000-000000000000",
         "type": "cuda",
-        "model": "rtx3090",
         "ram_mb": 24576,
         "available_ram_mb": 24576,
         "compute_units": 100,
@@ -21,7 +20,6 @@ DEVICES = [
     {
         "name": "cuda:GPU-00000000-0000-0000-0000-000000000001",
         "type": "cuda",
-        "model": "rtx3090",
         "ram_mb": 24576,
         "available_ram_mb": 8192,  # already partially used
         "compute_units": 100,
@@ -30,7 +28,6 @@ DEVICES = [
     {
         "name": "cuda:GPU-00000000-0000-0000-0000-000000000002",
         "type": "cuda",
-        "model": "a6000",
         "ram_mb": 49152,
         "available_ram_mb": 49152,
         "compute_units": 100,
@@ -39,7 +36,6 @@ DEVICES = [
     {
         "name": "cpu",
         "type": "cpu",
-        "model": None,
         "ram_mb": 65536,
         "available_ram_mb": 65536,
         "compute_units": 0,
@@ -130,7 +126,7 @@ class TestConsolidateSolver:
         """Simulated availability should decrease between reservation solve steps."""
         # Use a small DEVICES list to force re-use detection.
         devices = [
-            {"name": "cuda:GPU-00000000-0000-0000-0000-000000000000", "type": "cuda", "model": None,
+            {"name": "cuda:GPU-00000000-0000-0000-0000-000000000000", "type": "cuda",
              "ram_mb": 8192, "available_ram_mb": 8192,
              "compute_units": 100, "available_compute_units": 100},
         ]
@@ -157,12 +153,12 @@ class TestSpreadSolver:
         # Use a tight device list so the second allocation is forced onto a different device.
         devices_tight = [
             {
-                "name": "cuda:GPU-00000000-0000-0000-0000-000000000000", "type": "cuda", "model": None,
+                "name": "cuda:GPU-00000000-0000-0000-0000-000000000000", "type": "cuda",
                 "ram_mb": 8192, "available_ram_mb": 8192,
                 "compute_units": 100, "available_compute_units": 100,
             },
             {
-                "name": "cuda:GPU-00000000-0000-0000-0000-000000000001", "type": "cuda", "model": None,
+                "name": "cuda:GPU-00000000-0000-0000-0000-000000000001", "type": "cuda",
                 "ram_mb": 8192, "available_ram_mb": 8192,
                 "compute_units": 100, "available_compute_units": 100,
             },

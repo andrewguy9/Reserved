@@ -36,12 +36,11 @@ def _format_human(status: dict) -> str:
     lines: list[str] = []
     lines.append("Devices:")
     for d in status.get("devices", []):
-        model_str = f"  {d['model']}" if d.get("model") else ""
         ram_str = f"available: {d['available_ram_mb']:>6}/{d['ram_mb']} MB"
         cu = d.get("compute_units", 0)
         avail_cu = d.get("available_compute_units", 0)
         cu_str = f"  {avail_cu}/{cu} compute" if cu else ""
-        lines.append(f"  {d['name']:<10}  {d['type']:<6}{model_str:<12}  {ram_str}{cu_str}")
+        lines.append(f"  {d['name']:<10}  {d['type']:<6}  {ram_str}{cu_str}")
 
     lines.append("")
     lines.append("Reservations:")

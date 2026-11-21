@@ -91,7 +91,7 @@ def test_device_text_and_reservation_labels_are_displayed_literally():
     name = "cpu<&>"
     label = '<script>alert("job")</script> & train'
     ledger = core.load_ledger({"devices": [
-        {"name": name, "type": "cpu", "model": "<board>", "ram_mb": 2048},
+        {"name": name, "type": "cpu", "ram_mb": 2048},
     ]})
     ledger, result = core.grant(ledger, core.ReserveRequest(reservations=(
         core.ReservationRequest(label, (core.DeviceAllocation(name, ram_mb=256),)),
@@ -100,8 +100,7 @@ def test_device_text_and_reservation_labels_are_displayed_literally():
 
     html, tables = fetch_dashboard(ledger)
 
-    assert tables[0][1] == [name, "cpu", "<board>", "1792/2048 MB", "0/0"]
+    assert tables[0][1] == [name, "cpu", "1792/2048 MB", "0/0"]
     assert tables[1][1][1] == label
     assert tables[1][1][3:] == [name, "256 MB", "0"]
     assert "<script>" not in html
-    assert "<board>" not in html

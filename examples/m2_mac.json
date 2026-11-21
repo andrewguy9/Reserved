@@ -3,7 +3,6 @@
     {
       "name": "metal:0",
       "type": "metal",
-      "model": "m2",
       "ram_mb": 65536,
       "compute_units": 100
     },

@@ -29,7 +29,7 @@ from ..core import (
 # Type alias for a parsed status response (dict from JSON)
 # ---------------------------------------------------------------------------
 
-DeviceStatusDict = dict  # keys: name, type, model, ram_mb, available_ram_mb, etc.
+DeviceStatusDict = dict  # keys: name, type, ram_mb, available_ram_mb, etc.
 
 
 def _matches(device: DeviceStatusDict, constraint: "DeviceConstraint") -> bool:

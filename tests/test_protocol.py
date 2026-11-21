@@ -164,7 +164,6 @@ class TestStatusResultWire:
                 DeviceStatus(
                     name="cuda:GPU-00000000-0000-0000-0000-000000000000",
                     type="cuda",
-                    model="rtx3090",
                     ram_mb=24576,
                     available_ram_mb=16384,
                     compute_units=100,

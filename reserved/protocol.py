@@ -138,7 +138,6 @@ def status_result_to_wire(result: StatusResult) -> bytes:
             {
                 "name": d.name,
                 "type": d.type,
-                "model": d.model,
                 "ram_mb": d.ram_mb,
                 "available_ram_mb": d.available_ram_mb,
                 "compute_units": d.compute_units,

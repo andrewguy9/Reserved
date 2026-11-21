@@ -22,7 +22,6 @@ from dataclasses import dataclass
 class Device:
     name: str  # Physical device name.
     type: str
-    model: str | None
     ram_mb: int
     compute_units: int
 
@@ -105,7 +104,6 @@ GrantResult = GrantSuccess | GrantFailure
 class DeviceStatus:
     name: str  # Physical device name.
     type: str
-    model: str | None
     ram_mb: int
     available_ram_mb: int
     compute_units: int
@@ -169,7 +167,6 @@ def load_ledger(config: dict) -> Ledger:
         dev = Device(
             name=name,
             type=device_type,
-            model=d.get("model"),
             ram_mb=d.get("ram_mb", 0),
             compute_units=d.get("compute_units", 0),
         )
@@ -304,7 +301,6 @@ def status(ledger: Ledger) -> StatusResult:
         DeviceStatus(
             name=da.device.name,
             type=da.device.type,
-            model=da.device.model,
             ram_mb=da.device.ram_mb,
             available_ram_mb=da.available_ram_mb,
             compute_units=da.device.compute_units,

@@ -136,7 +136,6 @@ class _StatusHandler(BaseHTTPRequestHandler):
                 f"<tr>"
                 f"<td>{escape(d.name)}</td>"
                 f"<td>{escape(d.type)}</td>"
-                f"<td>{escape(d.model or '')}</td>"
                 f"<td>{d.available_ram_mb}/{d.ram_mb} MB</td>"
                 f"<td>{d.available_compute_units}/{d.compute_units}</td>"
                 f"</tr>\n"
@@ -174,7 +173,7 @@ h2{{margin-top:1.5em}}
 <h1>reserved status</h1>
 <h2>Devices</h2>
 <table>
-<tr><th>Name</th><th>Type</th><th>Model</th><th>RAM</th><th>Compute</th></tr>
+<tr><th>Name</th><th>Type</th><th>RAM</th><th>Compute</th></tr>
 {rows_devices}
 </table>
 <h2>Reservations</h2>

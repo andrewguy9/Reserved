@@ -114,8 +114,8 @@ verification using [INSTALL.md](INSTALL.md).
 ```json
 {
   "devices": [
-    { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", "type": "cuda", "model": "rtx3090", "ram_mb": 24576, "compute_units": 100 },
-    { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781", "type": "cuda", "model": "rtx3090", "ram_mb": 24576, "compute_units": 100 },
+    { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", "type": "cuda", "ram_mb": 24576, "compute_units": 100 },
+    { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781", "type": "cuda", "ram_mb": 24576, "compute_units": 100 },
     { "name": "cpu", "type": "cpu", "ram_mb": 65536 }
   ]
 }
@@ -362,8 +362,8 @@ reserve-status [--socket PATH] [--json]
 
 ```
 Devices:
-  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  cuda  rtx3090  available: 16384/24576 MB  100/100 compute
-  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781  cuda  rtx3090  available: 24576/24576 MB  100/100 compute
+  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  cuda  available: 16384/24576 MB  100/100 compute
+  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781  cuda  available: 24576/24576 MB  100/100 compute
 
 Reservations:
   a3f9c2  label=train  age=2m14s
@@ -386,7 +386,6 @@ Devices have the following fields:
 | --- | --- |
 | `name` | Unique physical identifier. CUDA uses `cuda:GPU-<uuid>` with the lowercase UUID printed by `nvidia-smi -L`. Metal uses `metal:0`. |
 | `type` | `cuda`, `metal`, or `cpu` |
-| `model` | Optional label for the hardware class, shown by `reserve-status` |
 | `ram_mb` | Total reservable RAM (VRAM for CUDA, unified memory for Metal, system RAM for CPU) |
 | `compute_units` | Optional opaque budget — convention between operator and callers |
 
@@ -395,8 +394,8 @@ Devices have the following fields:
 ```json
 {
   "devices": [
-    { "name": "metal:0", "type": "metal", "model": "m3-max", "ram_mb": 36864, "compute_units": 100 },
-    { "name": "cpu",     "type": "cpu",                       "ram_mb": 65536 }
+    { "name": "metal:0", "type": "metal", "ram_mb": 36864, "compute_units": 100 },
+    { "name": "cpu", "type": "cpu", "ram_mb": 65536 }
   ]
 }
 ```

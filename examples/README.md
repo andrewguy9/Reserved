@@ -33,10 +33,9 @@ actually in the machine instead of editing them by hand:
 python examples/cuda_config.py > /tmp/reserved-cuda.json
 ```
 
-[cuda_config.py](cuda_config.py) reads each card's UUID, product name, and
-total memory from `nvidia-smi`, names the devices `cuda:GPU-<uuid>`, labels
-each `model` as the lowercased product name (`rtx-a6000`), and sets `ram_mb` to
-the card's full memory. A UUID names one specific card, so no device-ordering
+[cuda_config.py](cuda_config.py) reads each card's UUID and total memory from
+`nvidia-smi`, names the devices `cuda:GPU-<uuid>`, and sets `ram_mb` to the
+card's full memory. A UUID names one specific card, so no device-ordering
 setting is needed. Pass `--ram-fraction 0.9` to commit only part of each card;
 budgets are entries in the reservation ledger and should reflect the memory you
 can commit to participating workloads. Use the generated names in the

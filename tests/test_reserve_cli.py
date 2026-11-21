@@ -46,9 +46,9 @@ def test_main_rejects_invalid_invocations(argv, message, capsys):
 
 
 STATUS_DEVICES = [
-    {"name": "cuda:GPU-00000000-0000-0000-0000-000000000001", "type": "cuda", "model": None,
+    {"name": "cuda:GPU-00000000-0000-0000-0000-000000000001", "type": "cuda",
      "ram_mb": 8192, "available_ram_mb": 8192, "compute_units": 100, "available_compute_units": 100},
-    {"name": "cpu", "type": "cpu", "model": None,
+    {"name": "cpu", "type": "cpu",
      "ram_mb": 4096, "available_ram_mb": 4096, "compute_units": 0, "available_compute_units": 0},
 ]
 

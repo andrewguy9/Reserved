@@ -28,10 +28,10 @@ from reserved.core import (
 
 SIMPLE_CONFIG = {
     "devices": [
-        {"name": "cuda:GPU-00000000-0000-0000-0000-000000000000", "type": "cuda", "model": "rtx3090", "ram_mb": 24576, "compute_units": 100},
-        {"name": "cuda:GPU-00000000-0000-0000-0000-000000000001", "type": "cuda", "model": "rtx3090", "ram_mb": 24576, "compute_units": 100},
-        {"name": "cuda:GPU-00000000-0000-0000-0000-000000000002", "type": "cuda", "model": "a6000",   "ram_mb": 49152, "compute_units": 100},
-        {"name": "cpu",    "type": "cpu",                       "ram_mb": 65536, "compute_units": 0},
+        {"name": "cuda:GPU-00000000-0000-0000-0000-000000000000", "type": "cuda", "ram_mb": 24576, "compute_units": 100},
+        {"name": "cuda:GPU-00000000-0000-0000-0000-000000000001", "type": "cuda", "ram_mb": 24576, "compute_units": 100},
+        {"name": "cuda:GPU-00000000-0000-0000-0000-000000000002", "type": "cuda", "ram_mb": 49152, "compute_units": 100},
+        {"name": "cpu", "type": "cpu", "ram_mb": 65536, "compute_units": 0},
     ]
 }
 
@@ -72,11 +72,6 @@ class TestLoadLedger:
     def test_no_reservations_initially(self):
         ledger = make_ledger()
         assert ledger.reservations == ()
-
-    def test_device_with_no_model(self):
-        cfg = {"devices": [{"name": "cpu", "type": "cpu", "ram_mb": 32768}]}
-        ledger = load_ledger(cfg)
-        assert ledger.availability[0].device.model is None
 
     def test_invalid_cuda_name_no_colon(self):
         cfg = {"devices": [{"name": "cuda0", "type": "cuda", "ram_mb": 8192}]}
@@ -122,8 +117,8 @@ class TestLoadLedger:
 
 METAL_CONFIG = {
     "devices": [
-        {"name": "metal:0", "type": "metal", "model": "m3-max", "ram_mb": 36864, "compute_units": 100},
-        {"name": "cpu",     "type": "cpu",                       "ram_mb": 65536, "compute_units": 0},
+        {"name": "metal:0", "type": "metal", "ram_mb": 36864, "compute_units": 100},
+        {"name": "cpu", "type": "cpu", "ram_mb": 65536, "compute_units": 0},
     ]
 }
 
@@ -497,7 +492,6 @@ class TestStatus:
         result = status(ledger)
         dev_map = {d.name: d for d in result.devices}
         assert dev_map["cuda:GPU-00000000-0000-0000-0000-000000000000"].type == "cuda"
-        assert dev_map["cuda:GPU-00000000-0000-0000-0000-000000000000"].model == "rtx3090"
         assert dev_map["cuda:GPU-00000000-0000-0000-0000-000000000000"].ram_mb == 24576
         assert dev_map["cuda:GPU-00000000-0000-0000-0000-000000000000"].available_ram_mb == 24576
         assert dev_map["cuda:GPU-00000000-0000-0000-0000-000000000000"].compute_units == 100
