@@ -8,6 +8,7 @@ and returns a new Ledger plus a result object.
 
 from __future__ import annotations
 
+import re
 import secrets
 import time
 from dataclasses import dataclass, field, replace
@@ -40,7 +41,7 @@ class DeviceAllocation:
     Clients send it in a reserve request, and a successful grant returns the
     same record for each allocation it holds.
     """
-    name: str          # physical device name, e.g. "cuda:0"
+    name: str          # physical device name, e.g. "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782" or "cpu"
     ram_mb: int = 0
     compute_units: int = 0
 
@@ -129,28 +130,33 @@ class StatusResult:
 # Functions
 # ---------------------------------------------------------------------------
 
-def cuda_ordinal(name: str) -> int:
-    """Return the physical CUDA ordinal N encoded in a ``cuda:N`` device name.
+_CUDA_UUID = re.compile(
+    r"GPU-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
 
-    The name is the only identity a CUDA device has: the ordinal is what the
-    driver understands in ``CUDA_VISIBLE_DEVICES``. Only a non-negative ASCII
-    decimal ordinal is accepted. Raises ValueError for any other name,
-    including non-CUDA names.
+
+def cuda_uuid(name: str) -> str:
+    """Return the GPU UUID encoded in a ``cuda:GPU-<uuid>`` device name.
+
+    The UUID is the device's only identity. It is what ``nvidia-smi -L``
+    prints, what ``CUDA_VISIBLE_DEVICES`` accepts, and what torch reports for
+    each visible device, so no enumeration order is involved anywhere. The hex
+    digits must be lowercase, exactly as the driver prints them. Raises
+    ValueError for any other name, including non-CUDA names.
     """
-    kind, sep, ordinal_text = name.partition(":")
-    if kind != "cuda" or not sep or ":" in ordinal_text:
-        raise ValueError(f"invalid CUDA device name {name!r}: must be 'cuda:N'")
-    if not (ordinal_text.isascii() and ordinal_text.isdecimal()):
+    kind, sep, uuid_text = name.partition(":")
+    if kind != "cuda" or not sep or not _CUDA_UUID.match(uuid_text):
         raise ValueError(
-            f"invalid CUDA device name {name!r}: ordinal must be a non-negative integer"
+            f"invalid CUDA device name {name!r}: must be 'cuda:GPU-<uuid>' "
+            "with the lowercase UUID printed by 'nvidia-smi -L'"
         )
-    return int(ordinal_text)
+    return uuid_text
 
 
 def _validate_device_name(name: str, device_type: str) -> None:
     """Raise ValueError if a device name is invalid for its type."""
     if device_type == "cuda":
-        cuda_ordinal(name)
+        cuda_uuid(name)
 
 
 def load_ledger(config: dict) -> Ledger:

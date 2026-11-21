@@ -14,7 +14,7 @@ from reserved.sdk.errors import DaemonNotRunningError
 STATUS = {
     "devices": [
         {
-            "name": "cuda:0",
+            "name": "cuda:GPU-00000000-0000-0000-0000-000000000000",
             "type": "cuda",
             "model": "rtx3090",
             "ram_mb": 24576,
@@ -38,7 +38,7 @@ STATUS = {
             "label": "train",
             "created_at": 100.0,
             "allocations": [
-                {"name": "cuda:0", "ram_mb": 8192, "compute_units": 25},
+                {"name": "cuda:GPU-00000000-0000-0000-0000-000000000000", "ram_mb": 8192, "compute_units": 25},
             ],
         },
     ],
@@ -52,7 +52,7 @@ def test_format_human_includes_devices_reservations_and_capacity(monkeypatch):
 
     for expected in [
         "Devices:",
-        "cuda:0",
+        "cuda:GPU-00000000-0000-0000-0000-000000000000",
         "rtx3090",
         "16384/24576 MB",
         "75/100 compute",

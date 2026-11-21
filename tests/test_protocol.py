@@ -58,7 +58,7 @@ class TestReserveRequestWire:
             ReservationRequest(
                 label="train",
                 allocations=(
-                    DeviceAllocation(name="cuda:0", ram_mb=8192, compute_units=50),
+                    DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000000", ram_mb=8192, compute_units=50),
                 ),
             ),
         ))
@@ -80,16 +80,16 @@ class TestReserveRequestWire:
         data = reserve_request_to_wire(req)
         obj = json.loads(data)
         slot = obj["reservations"][0]["allocations"][0]
-        assert slot["name"] == "cuda:0"
+        assert slot["name"] == "cuda:GPU-00000000-0000-0000-0000-000000000000"
         assert slot["ram_mb"] == 8192
         assert slot["compute_units"] == 50
 
     def test_deserialize_reserve_request(self):
-        wire = b'{"op":"reserve","reservations":[{"label":"lora","allocations":[{"name":"cuda:1","ram_mb":2048,"compute_units":0}]}]}\n'
+        wire = b'{"op":"reserve","reservations":[{"label":"lora","allocations":[{"name":"cuda:GPU-00000000-0000-0000-0000-000000000001","ram_mb":2048,"compute_units":0}]}]}\n'
         obj = parse_request(wire)
         req = wire_to_reserve_request(obj)
         assert req.reservations[0].label == "lora"
-        assert req.reservations[0].allocations[0].name == "cuda:1"
+        assert req.reservations[0].allocations[0].name == "cuda:GPU-00000000-0000-0000-0000-000000000001"
         assert req.reservations[0].allocations[0].ram_mb == 2048
 
     def test_serialize_deserialize_roundtrip(self):
@@ -103,8 +103,8 @@ class TestReserveRequestWire:
 
     def test_multi_reservation_roundtrip(self):
         req = ReserveRequest(reservations=(
-            ReservationRequest(label="a", allocations=(DeviceAllocation(name="cuda:0", ram_mb=4096),)),
-            ReservationRequest(label="b", allocations=(DeviceAllocation(name="cuda:1", ram_mb=2048),)),
+            ReservationRequest(label="a", allocations=(DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000000", ram_mb=4096),)),
+            ReservationRequest(label="b", allocations=(DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000001", ram_mb=2048),)),
         ))
         wire = reserve_request_to_wire(req)
         obj = parse_request(wire)
@@ -126,7 +126,7 @@ class TestGrantSuccessWire:
             GrantedReservation(
                 reservation_id="a3f9c2",
                 label="train",
-                allocations=(DeviceAllocation(name="cuda:0", ram_mb=8192, compute_units=50),),
+                allocations=(DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000000", ram_mb=8192, compute_units=50),),
                 created_at=1748000000.0,
             ),
         ))
@@ -145,7 +145,7 @@ class TestGrantSuccessWire:
         data = grant_success_to_wire(self._make_success())
         obj = json.loads(data)
         assert obj["reservations"][0]["allocations"] == [
-            {"name": "cuda:0", "ram_mb": 8192, "compute_units": 50},
+            {"name": "cuda:GPU-00000000-0000-0000-0000-000000000000", "ram_mb": 8192, "compute_units": 50},
         ]
 
 
@@ -163,7 +163,7 @@ class TestStatusResultWire:
         return StatusResult(
             devices=(
                 DeviceStatus(
-                    name="cuda:0",
+                    name="cuda:GPU-00000000-0000-0000-0000-000000000000",
                     type="cuda",
                     model="rtx3090",
                     ram_mb=24576,
@@ -179,7 +179,7 @@ class TestStatusResultWire:
                     created_at=1748000000.0,
                     allocations=(
                         DeviceAllocation(
-                            name="cuda:0",
+                            name="cuda:GPU-00000000-0000-0000-0000-000000000000",
                             ram_mb=8192,
                             compute_units=50,
                         ),
@@ -192,7 +192,7 @@ class TestStatusResultWire:
         data = status_result_to_wire(self._make_status())
         obj = json.loads(data)
         d = obj["devices"][0]
-        assert d["name"] == "cuda:0"
+        assert d["name"] == "cuda:GPU-00000000-0000-0000-0000-000000000000"
         assert d["available_ram_mb"] == 16384
         assert d["available_compute_units"] == 50
 
@@ -202,7 +202,7 @@ class TestStatusResultWire:
         r = obj["reservations"][0]
         assert r["id"] == "a3f9c2"
         assert r["label"] == "train"
-        assert r["allocations"][0]["name"] == "cuda:0"
+        assert r["allocations"][0]["name"] == "cuda:GPU-00000000-0000-0000-0000-000000000000"
         assert r["allocations"][0]["ram_mb"] == 8192
 
 

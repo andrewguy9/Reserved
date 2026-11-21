@@ -18,6 +18,7 @@ import os
 import select
 import socket
 import threading
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -26,7 +27,7 @@ from reserved.core import (
     DeviceAllocation,
     ReservationRequest,
     ReserveRequest,
-    cuda_ordinal,
+    cuda_uuid,
 )
 from reserved.paths import client_socket_override as _get_socket_override, client_socket_paths
 from reserved.sdk.errors import (
@@ -82,7 +83,7 @@ class DeviceConstraint:
 @dataclass
 class ExplicitSlot:
     """An explicit slot — directly names a physical device."""
-    name: str  # Physical device name, e.g. "cuda:2".
+    name: str  # Physical device name, e.g. "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782".
     ram_mb: int = 0
     compute_units: int = 0
 
@@ -99,61 +100,60 @@ class ExplicitSlot:
 @dataclass
 class GrantedDevice:
     """A physical device allocation granted by the daemon."""
-    device_name: str  # Physical device name, e.g. "cuda:2".
+    device_name: str  # Physical device name, e.g. "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782".
 
     def torch_device(self) -> Any:
         """Return the process-local PyTorch device for this physical grant.
 
-        CUDA uses the grant's logical index within CUDA_VISIBLE_DEVICES. Set
-        the mask before CUDA initializes. Hidden devices, ambiguous masks, and
-        unsupported device kinds raise ReservationError.
+        A CUDA grant resolves to the device torch reports with the same GPU
+        UUID, so the result is correct under any CUDA_VISIBLE_DEVICES, set or
+        unset, and the SDK never reads or writes the mask. This initializes
+        CUDA in the calling process, so call it in the process that will use
+        the GPU. A grant torch cannot see, a torch build that does not report
+        device UUIDs, and unsupported device kinds raise ReservationError.
         """
         device_type = self.device_name.partition(":")[0]
+        import torch  # type: ignore[import]
         if device_type == "cuda":
-            logical_index = _logical_cuda_index(
-                self.device_name, os.environ.get("CUDA_VISIBLE_DEVICES"),
-            )
-            torch_name = f"cuda:{logical_index}"
+            torch_name = f"cuda:{_torch_cuda_index(self.device_name, torch)}"
         elif device_type == "metal":
             torch_name = "mps"
         elif device_type == "cpu":
             torch_name = "cpu"
         else:
             raise ReservationError(f"unsupported PyTorch device {self.device_name!r}")
-
-        import torch  # type: ignore[import]
         return torch.device(torch_name)
 
 
-def _logical_cuda_index(physical_name: str, mask: str | None) -> int:
+def _torch_cuda_index(physical_name: str, torch_module: Any) -> int:
+    """Return the index torch assigns to the CUDA device named by *physical_name*.
+
+    torch enumerates the devices visible to this process; each reports its GPU
+    UUID as 16 raw bytes. The grant's UUID is matched against them, so the
+    index is right whatever CUDA_VISIBLE_DEVICES the process was started with.
+    """
     try:
-        physical_ordinal = cuda_ordinal(physical_name)
+        wanted = cuda_uuid(physical_name)
     except ValueError as exc:
         raise ReservationError(str(exc)) from exc
-    if mask is None:
-        return physical_ordinal
 
-    visible_ordinals: list[int] = []
-    if mask not in ("", "-1"):
-        tokens = mask.split(",")
-        try:
-            if not all(token.isascii() and token.isdecimal() for token in tokens):
-                raise ValueError
-            visible_ordinals = [int(token) for token in tokens]
-            if max(visible_ordinals) > 2**31 - 1 or len(set(visible_ordinals)) != len(tokens):
-                raise ValueError
-        except ValueError as exc:
+    visible: list[str] = []
+    for index in range(torch_module.cuda.device_count()):
+        properties = torch_module.cuda.get_device_properties(index)
+        raw = getattr(properties, "uuid", None)
+        if raw is None:
             raise ReservationError(
-                f"cannot map physical device {physical_name!r}: invalid "
-                f"CUDA_VISIBLE_DEVICES={mask!r}; expected distinct numeric CUDA ordinals"
-            ) from exc
-
-    try:
-        return visible_ordinals.index(physical_ordinal)
-    except ValueError as exc:
-        raise ReservationError(
-            f"physical device {physical_name!r} is not visible in CUDA_VISIBLE_DEVICES={mask!r}"
-        ) from exc
+                f"cannot map physical device {physical_name!r}: this torch build does "
+                "not report CUDA device UUIDs"
+            )
+        reported = "GPU-" + str(uuid.UUID(bytes=bytes(raw.bytes)))
+        if reported == wanted:
+            return index
+        visible.append(reported)
+    raise ReservationError(
+        f"physical device {physical_name!r} is not visible to torch; visible CUDA "
+        f"devices: {visible} (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +461,7 @@ def _parse_inherited_grants(grants_json: str | None) -> list[GrantedDevice]:
             if not isinstance(physical_name, str):
                 raise ValueError
             if physical_name.partition(":")[0] == "cuda":
-                cuda_ordinal(physical_name)  # reject a CUDA name the driver cannot address
+                cuda_uuid(physical_name)  # reject a CUDA name the driver cannot address
             devices.append(GrantedDevice(physical_name))
         return devices
     except (RecursionError, ValueError) as exc:

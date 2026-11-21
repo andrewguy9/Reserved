@@ -22,10 +22,10 @@ def test_parse_slot_ram_and_compute_aliases_are_equivalent():
 
 
 def test_parse_slot_name_selects_explicit_slot():
-    slot = parse_slot("name=cuda:2,type=cuda,ram=4096,compute=50")
+    slot = parse_slot("name=cuda:GPU-00000000-0000-0000-0000-000000000002,type=cuda,ram=4096,compute=50")
 
     assert isinstance(slot, ExplicitSlot)
-    assert slot.name == "cuda:2"
+    assert slot.name == "cuda:GPU-00000000-0000-0000-0000-000000000002"
     assert slot.ram_mb == 4096
     assert slot.compute_units == 50
 
@@ -48,7 +48,7 @@ def test_main_rejects_invalid_invocations(argv, message, capsys):
 
 def test_build_reserve_request_for_explicit_slots_preserves_order_and_capacity():
     slots = [
-        ExplicitSlot("cuda:1", ram_mb=4096, compute_units=25),
+        ExplicitSlot("cuda:GPU-00000000-0000-0000-0000-000000000001", ram_mb=4096, compute_units=25),
         ExplicitSlot("cpu", ram_mb=1024),
     ]
 
@@ -56,7 +56,7 @@ def test_build_reserve_request_for_explicit_slots_preserves_order_and_capacity()
 
     assert req.reservations == (
         ReservationRequest(label="job", allocations=(
-            DeviceAllocation(name="cuda:1", ram_mb=4096, compute_units=25),
+            DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000001", ram_mb=4096, compute_units=25),
             DeviceAllocation(name="cpu", ram_mb=1024, compute_units=0),
         )),
     )
@@ -84,13 +84,13 @@ def test_build_reserve_request_delegates_constraints_to_solver():
             ))
 
     solver = RecordingSolver()
-    devices = [{"name": "cuda:0"}]
+    devices = [{"name": "cuda:GPU-00000000-0000-0000-0000-000000000000"}]
     slots = [DeviceConstraint("cuda", ram_mb=2048)]
 
     req = build_reserve_request("job", slots, solver, devices)
 
     assert solver.calls == [([("job", slots)], devices)]
-    assert req.reservations[0].allocations[0] == DeviceAllocation(name="cuda:0", ram_mb=2048)
+    assert req.reservations[0].allocations[0] == DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000000", ram_mb=2048)
 
 
 def test_build_reserve_request_requires_status_for_constraints():
@@ -102,10 +102,10 @@ def test_build_exec_env_sets_reservation_metadata_without_mutating_base_env():
     base = {"KEEP": "yes"}
     granted_allocations = [
         {"name": "cpu:batch,worker", "ram_mb": 1024, "compute_units": 0},
-        {"name": "cuda:2", "ram_mb": 4096, "compute_units": 0},
-        {"name": "cuda:2", "ram_mb": 2048, "compute_units": 0},
+        {"name": "cuda:GPU-00000000-0000-0000-0000-000000000002", "ram_mb": 4096, "compute_units": 0},
+        {"name": "cuda:GPU-00000000-0000-0000-0000-000000000002", "ram_mb": 2048, "compute_units": 0},
         {"name": "metal:0", "ram_mb": 512, "compute_units": 0},
-        {"name": "cuda:3", "ram_mb": 4096, "compute_units": 0},
+        {"name": "cuda:GPU-00000000-0000-0000-0000-000000000003", "ram_mb": 4096, "compute_units": 0},
     ]
 
     env = build_exec_env(base, granted_allocations, "abc123", 9)
@@ -114,9 +114,11 @@ def test_build_exec_env_sets_reservation_metadata_without_mutating_base_env():
     assert env["KEEP"] == "yes"
     assert env["RESERVED_ID"] == "abc123"
     assert env["RESERVED_FD"] == "9"
-    assert env["RESERVED_DEVICE"] == "cuda:2"
-    assert env["RESERVED_DEVICES"] == "cpu:batch,worker,cuda:2,cuda:2,metal:0,cuda:3"
-    assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
+    assert env["RESERVED_DEVICE"] == "cuda:GPU-00000000-0000-0000-0000-000000000002"
+    assert env["RESERVED_DEVICES"] == "cpu:batch,worker,cuda:GPU-00000000-0000-0000-0000-000000000002,cuda:GPU-00000000-0000-0000-0000-000000000002,metal:0,cuda:GPU-00000000-0000-0000-0000-000000000003"
+    assert env["CUDA_VISIBLE_DEVICES"] == (
+        "GPU-00000000-0000-0000-0000-000000000002,GPU-00000000-0000-0000-0000-000000000003"
+    )
     assert json.loads(env["RESERVED_GRANTED_ALLOCATIONS"]) == granted_allocations
 
 

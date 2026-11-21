@@ -19,18 +19,19 @@ Run these commands from the repository root on a Linux machine with NVIDIA GPUs.
 Use an environment with ReserveD installed and a CUDA-enabled build of PyTorch
 for the worker. See the [PyTorch installation selector](https://pytorch.org/get-started/locally/).
 
-Check which GPUs the machine exposes and how much memory they have:
+Check which GPUs the machine exposes, their UUIDs, and how much memory they have:
 
 ```bash
-nvidia-smi --query-gpu=index,name,memory.total,pci.bus_id --format=csv
+nvidia-smi -L
+nvidia-smi --query-gpu=index,name,memory.total --format=csv
 ```
 
-The example configs assume GPU `0` for one card and GPUs `0` and `1` for two
-cards. Adjust the `cuda:N` names and `ram_mb` budgets to your machine. These
-budgets are entries in the reservation ledger. Choose them based on the memory
-you can commit to participating workloads. This example uses CUDA's PCI bus
-ordering. Verify that the configured ordinals identify the intended cards.
-See [NVIDIA's CUDA environment variables](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html#device-enumeration-and-properties).
+The example configs use placeholder UUIDs. Replace each `cuda:GPU-...` name
+with a UUID from `nvidia-smi -L`, and use the same names in the `reserve`
+commands below. A UUID names one specific card, so no device-ordering setting
+is needed. Adjust the `ram_mb` budgets to your machine. These budgets are
+entries in the reservation ledger. Choose them based on the memory you can
+commit to participating workloads.
 
 In the first terminal, start a demo daemon. Use [cuda.json](cuda.json) for one
 card or substitute [cuda_dual.json](cuda_dual.json) for two cards. Stop the demo
@@ -45,7 +46,6 @@ In the second terminal, use the same environment and socket:
 
 ```bash
 export RESERVED_SOCKET="/tmp/reserved-cuda-demo-$(id -u).sock"
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
 reserve-status
 ```
 
@@ -67,12 +67,12 @@ Two `type=cuda` slots can share a card under the default solver. Naming the card
 guarantees distinct grants.
 
 ```bash
-reserve cuda-dual-demo name=cuda:0,ram=1024 name=cuda:1,ram=1024 -- python examples/cuda_job.py
+reserve cuda-dual-demo name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780,ram=1024 name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781,ram=1024 -- python examples/cuda_job.py
 ```
 
 The worker prints one physical-to-logical mapping per grant. For example, if
-you request `cuda:1` before `cuda:0`, the first grant maps to PyTorch's `cuda:0`
-and the second to `cuda:1`. The worker releases the reservation after the tensor
+you name the second card before the first, the first grant maps to PyTorch's
+`cuda:0` and the second to `cuda:1`. The worker releases the reservation after the tensor
 operations finish. Run `reserve-status` again to see the capacity return.
 
 To check allocation without PyTorch, run either command with `reserve-status`

@@ -13,7 +13,7 @@ if _here not in sys.path:
     sys.path.insert(0, _here)
 
 from reserved.cli import parse_options, usage_error
-from reserved.core import DeviceAllocation, ReservationRequest, ReserveRequest, cuda_ordinal
+from reserved.core import DeviceAllocation, ReservationRequest, ReserveRequest, cuda_uuid
 from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import (
     DeviceConstraint,
@@ -44,12 +44,13 @@ SLOT format: comma-separated key=value pairs.
     model=MODEL      Device model label
     ram=MB           RAM in MB (alias for ram_mb)
     compute=N        Compute units (alias for compute_units)
-    name=NAME        Pin to a physical device (bypasses solver)
+    name=NAME        Pin to a physical device (bypasses solver).
+                     CUDA names are cuda:GPU-<uuid> as printed by nvidia-smi -L.
 
 Examples:
     reserve train type=cuda,ram=8192 -- python train.py
-    reserve infer name=cuda:2 -- python infer.py
-    reserve distributed name=cuda:0 name=cuda:1 -- python dist.py
+    reserve infer name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782 -- python infer.py
+    reserve dist name=cuda:GPU-...80 name=cuda:GPU-...81 -- python dist.py
 """
 
 
@@ -113,12 +114,12 @@ def build_exec_env(
 ) -> dict[str, str]:
     """Pass granted allocations and CUDA visibility to the child process."""
     physical_names = [a["name"] for a in granted_allocations]
-    physical_cuda_ordinals: list[str] = []
+    cuda_uuids: list[str] = []
     for name in physical_names:
         if name.partition(":")[0] == "cuda":
-            ordinal = str(cuda_ordinal(name))
-            if ordinal not in physical_cuda_ordinals:
-                physical_cuda_ordinals.append(ordinal)
+            token = cuda_uuid(name)
+            if token not in cuda_uuids:
+                cuda_uuids.append(token)
 
     first_accel = next(
         (name for name in physical_names if not name.startswith("cpu")),
@@ -126,8 +127,8 @@ def build_exec_env(
     )
 
     env = base_env.copy()
-    if physical_cuda_ordinals:
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(physical_cuda_ordinals)
+    if cuda_uuids:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_uuids)
     env["RESERVED_DEVICE"] = first_accel
     env["RESERVED_DEVICES"] = ",".join(physical_names)
     # Preserve allocation boundaries even when a configured name contains a comma.

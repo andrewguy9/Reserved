@@ -1,6 +1,6 @@
 {
   "devices": [
-    { "name": "cuda:0", "type": "cuda", "ram_mb": 8192 },
-    { "name": "cuda:1", "type": "cuda", "ram_mb": 8192 }
+    { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", "type": "cuda", "ram_mb": 8192 },
+    { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781", "type": "cuda", "ram_mb": 8192 }
   ]
 }

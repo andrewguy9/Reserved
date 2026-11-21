@@ -56,13 +56,13 @@ def fetch_dashboard(ledger):
 
 
 @pytest.mark.parametrize("slots, expected", [
-    ((core.DeviceAllocation("cuda:0", 1024, 1),), [
-        ["abc123", "infer", "1m0s", "cuda:0", "1024 MB", "1"],
+    ((core.DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000000", 1024, 1),), [
+        ["abc123", "infer", "1m0s", "cuda:GPU-00000000-0000-0000-0000-000000000000", "1024 MB", "1"],
     ]),
-    ((core.DeviceAllocation("cuda:0", 1024, 1),
-      core.DeviceAllocation("cuda:2", 2048, 0)), [
-        ["abc123", "infer", "1m0s", "cuda:0", "1024 MB", "1"],
-        ["abc123", "infer", "1m0s", "cuda:2", "2048 MB", "0"],
+    ((core.DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000000", 1024, 1),
+      core.DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000002", 2048, 0)), [
+        ["abc123", "infer", "1m0s", "cuda:GPU-00000000-0000-0000-0000-000000000000", "1024 MB", "1"],
+        ["abc123", "infer", "1m0s", "cuda:GPU-00000000-0000-0000-0000-000000000002", "2048 MB", "0"],
     ]),
     ((), [["abc123", "infer", "1m0s", "—", "—", "—"]]),
 ])

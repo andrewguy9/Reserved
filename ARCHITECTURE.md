@@ -22,7 +22,7 @@
 The daemon speaks only in explicit terms. Every slot names a physical device and states exactly how much capacity to claim:
 
 ```
-slot: name=cuda:0  ram_mb=8192  compute_units=50
+slot: name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  ram_mb=8192  compute_units=50
 ```
 
 No wildcards. No type matching. The daemon checks whether the named device has sufficient capacity and subtracts if so.
@@ -85,11 +85,11 @@ Line-delimited JSON over a Unix domain socket. Each message is one JSON object t
   "reservations": [
     {
       "label": "checkpoint",
-      "allocations": [{ "name": "cuda:2", "ram_mb": 8192, "compute_units": 50 }]
+      "allocations": [{ "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 8192, "compute_units": 50 }]
     },
     {
       "label": "lora",
-      "allocations": [{ "name": "cuda:2", "ram_mb": 2048, "compute_units": 0 }]
+      "allocations": [{ "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 2048, "compute_units": 0 }]
     }
   ]
 }
@@ -104,12 +104,12 @@ Line-delimited JSON over a Unix domain socket. Each message is one JSON object t
     {
       "reservation_id": "a3f9c2",
       "label": "checkpoint",
-      "allocations": [{ "name": "cuda:2", "ram_mb": 8192, "compute_units": 50 }]
+      "allocations": [{ "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 8192, "compute_units": 50 }]
     },
     {
       "reservation_id": "b7e1d4",
       "label": "lora",
-      "allocations": [{ "name": "cuda:2", "ram_mb": 2048, "compute_units": 0 }]
+      "allocations": [{ "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 2048, "compute_units": 0 }]
     }
   ]
 }
@@ -117,9 +117,9 @@ Line-delimited JSON over a Unix domain socket. Each message is one JSON object t
 
 Each granted allocation is the requested record echoed back: the same
 `name`, `ram_mb`, and `compute_units`. The name is the physical identity of
-the device. For CUDA it is `cuda:N`, where `N` is the ordinal the driver
-understands in `CUDA_VISIBLE_DEVICES`; clients derive the ordinal from the
-name rather than receiving it separately.
+the device. For CUDA it is `cuda:GPU-<uuid>`, the UUID printed by
+`nvidia-smi -L`, which `CUDA_VISIBLE_DEVICES` accepts directly and torch
+reports for each visible device. Nothing else identifies a device.
 
 **Reserve response (failure):**
 
@@ -188,26 +188,33 @@ See [Getting started](GETTING_STARTED.md#hold-capacity-for-a-model-worker).
 ## CUDA device indexing
 
 Physical device names identify hardware in the config, CLI `name=` slots,
-solver, ledger, protocol, and SDK grant metadata. For example,
-`reserve infer name=cuda:2 -- python infer.py` claims physical `cuda:2`.
-The CLI exports that name in `RESERVED_DEVICE` and `RESERVED_DEVICES`, and
-passes the granted allocations in `RESERVED_GRANTED_ALLOCATIONS` for SDK
-adoption. `CUDA_VISIBLE_DEVICES=2` exposes the granted GPU to the worker.
-Multiple CUDA slots contribute distinct physical ordinals in first-grant order.
+solver, ledger, protocol, and SDK grant metadata. A CUDA name is
+`cuda:GPU-<uuid>`. The UUID is the one `nvidia-smi -L` prints, so it names one
+specific board regardless of the driver's enumeration order, and
+`CUDA_VISIBLE_DEVICES` accepts it directly. For example,
+`reserve infer name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782 -- python infer.py`
+claims that card. The CLI exports the name in `RESERVED_DEVICE` and
+`RESERVED_DEVICES`, passes the granted allocations in
+`RESERVED_GRANTED_ALLOCATIONS` for SDK adoption, and sets
+`CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` so the worker sees only
+the granted GPU. Multiple CUDA slots contribute distinct UUIDs in first-grant
+order.
 
-`GrantedDevice.torch_device()` is the conversion boundary. It reads the
-physical ordinal from the device name and maps it to its zero-based position
-in the current process's CUDA mask. The worker above gets `torch.device("cuda:0")`. A process with
-`CUDA_VISIBLE_DEVICES=5,2` gets `torch.device("cuda:1")` for the same physical
-grant. `Reservation.torch_devices()` applies the conversion in grant order.
-Multiple slots on the same GPU resolve to the same logical index.
+`GrantedDevice.torch_device()` is the conversion boundary. It enumerates the
+CUDA devices torch can see, reads each one's UUID from its device properties,
+and returns the index whose UUID matches the grant. The worker above gets
+`torch.device("cuda:0")`. A process started with
+`CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781,GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782`
+gets `torch.device("cuda:1")` for the same grant, and a process with no mask
+gets the card's position in torch's full enumeration. `Reservation.torch_devices()`
+applies the conversion in grant order. Multiple slots on the same GPU resolve
+to the same logical index.
 
-An unset mask uses the physical ordinal as the logical index, assuming the
-unmasked CUDA order matches the configured physical ordinals. Configure
-visibility before CUDA initializes. The SDK checks that the mask is a list of
-distinct nonnegative decimal ordinals and that the grant appears in it. Empty
-and `-1` masks hide all CUDA devices. Hidden grants and unsupported masks
-raise `ReservationError`.
+The SDK never reads or writes `CUDA_VISIBLE_DEVICES`; it only reports the mask
+in error messages. Resolving a CUDA grant initializes CUDA in the calling
+process, so it belongs in the process that will use the GPU. A grant torch
+cannot see and a torch build that does not report device UUIDs raise
+`ReservationError`.
 
 ---
 

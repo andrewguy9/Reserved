@@ -179,10 +179,10 @@ inherited lease and call `check()` at checkpoints to detect daemon shutdown.
 
 ### CUDA device indices
 
-The CLI sets `CUDA_VISIBLE_DEVICES` to granted physical ordinals. A worker
-launched with `reserve model-worker name=cuda:2 -- python -m model_worker`
-sees `RESERVED_DEVICE=cuda:2`, `RESERVED_DEVICES=cuda:2`, and
-`CUDA_VISIBLE_DEVICES=2`.
+The CLI sets `CUDA_VISIBLE_DEVICES` to the granted GPU UUIDs. A worker
+launched with `reserve model-worker name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782 -- python -m model_worker`
+sees `RESERVED_DEVICE` and `RESERVED_DEVICES` set to that name and
+`CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782`.
 
 ```python
 from reserved import sdk
@@ -193,17 +193,19 @@ with sdk.adopt_inherited_lease() as reservation:
 ```
 
 Use `torch_devices()` the same way with an SDK-acquired reservation. The helper
-reads the process's existing CUDA visibility and returns PyTorch devices in
-grant order. `reservation.devices` holds the physical grant names for
+asks torch which visible device carries the granted UUID and returns PyTorch
+devices in grant order, so it does not depend on how the process's CUDA
+visibility was set. `reservation.devices` holds the physical grant names for
 diagnostics.
 
-| Physical grant in `reservation.devices` | Process's `CUDA_VISIBLE_DEVICES` | Logical PyTorch device |
+| Physical grant in `reservation.devices` | CUDA devices torch can see | Logical PyTorch device |
 | --- | --- | --- |
-| `cuda:2` | Unset | `cuda:2` |
-| `cuda:2` | `2` | `cuda:0` |
-| `cuda:2` | `5,2` | `cuda:1` |
+| `cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` | All cards, unmasked; this is the third | `cuda:2` |
+| `cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` | `GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` only | `cuda:0` |
+| `cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` | `GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781`, then `GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` | `cuda:1` |
 
-Set visibility before CUDA initializes.
+Resolving a CUDA grant initializes CUDA, so call `torch_devices()` in the
+process that will use the GPU.
 See [CUDA device indexing](ARCHITECTURE.md#cuda-device-indexing).
 
 ## Handle failures
