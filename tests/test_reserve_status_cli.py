@@ -38,7 +38,7 @@ STATUS = {
             "label": "train",
             "created_at": 100.0,
             "allocations": [
-                {"device_name": "cuda:0", "ram_mb": 8192, "compute_units": 25},
+                {"name": "cuda:0", "ram_mb": 8192, "compute_units": 25},
             ],
         },
     ],

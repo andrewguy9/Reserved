@@ -56,11 +56,11 @@ def fetch_dashboard(ledger):
 
 
 @pytest.mark.parametrize("slots, expected", [
-    ((core.ActiveReservation.ClaimedAllocation("cuda:0", 1024, 1),), [
+    ((core.DeviceAllocation("cuda:0", 1024, 1),), [
         ["abc123", "infer", "1m0s", "cuda:0", "1024 MB", "1"],
     ]),
-    ((core.ActiveReservation.ClaimedAllocation("cuda:0", 1024, 1),
-      core.ActiveReservation.ClaimedAllocation("cuda:2", 2048, 0)), [
+    ((core.DeviceAllocation("cuda:0", 1024, 1),
+      core.DeviceAllocation("cuda:2", 2048, 0)), [
         ["abc123", "infer", "1m0s", "cuda:0", "1024 MB", "1"],
         ["abc123", "infer", "1m0s", "cuda:2", "2048 MB", "0"],
     ]),

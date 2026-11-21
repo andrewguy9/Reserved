@@ -147,7 +147,7 @@ class _StatusHandler(BaseHTTPRequestHandler):
             age = int(now - r.created_at)
             age_str = f"{age // 60}m{age % 60}s"
             allocation_cells = [
-                f"<td>{escape(s.device_name)}</td>"
+                f"<td>{escape(s.name)}</td>"
                 f"<td>{s.ram_mb} MB</td><td>{s.compute_units}</td>"
                 for s in r.allocations
             ] or ["<td>—</td><td>—</td><td>—</td>"]

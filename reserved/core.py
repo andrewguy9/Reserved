@@ -68,17 +68,10 @@ class GrantedReservation:
 
 @dataclass(frozen=True)
 class ActiveReservation:
-    """Tracks a live reservation in the ledger — includes the claimed resources."""
-
-    @dataclass(frozen=True)
-    class ClaimedAllocation:
-        device_name: str  # Physical device name.
-        ram_mb: int
-        compute_units: int
-
+    """Tracks a live reservation in the ledger: the allocations it holds."""
     reservation_id: str
     label: str
-    allocations: tuple[ActiveReservation.ClaimedAllocation, ...]
+    allocations: tuple[DeviceAllocation, ...]
     created_at: float
 
 
@@ -123,7 +116,7 @@ class ReservationStatus:
     id: str
     label: str
     created_at: float
-    allocations: tuple[ActiveReservation.ClaimedAllocation, ...]
+    allocations: tuple[DeviceAllocation, ...]
 
 
 @dataclass(frozen=True)
@@ -240,16 +233,7 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
     for res_req in request.reservations:
         reservation_id = secrets.token_hex(3)  # 6 hex chars
 
-        claimed_allocations = tuple(
-            ActiveReservation.ClaimedAllocation(
-                device_name=allocation.name,
-                ram_mb=allocation.ram_mb,
-                compute_units=allocation.compute_units,
-            )
-            for allocation in res_req.allocations
-        )
-
-        # The grant echoes the explicit allocations exactly as requested.
+        # The grant and the ledger both hold the allocations exactly as requested.
         granted_reservations.append(GrantedReservation(
             reservation_id=reservation_id,
             label=res_req.label,
@@ -259,7 +243,7 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
         active_reservations.append(ActiveReservation(
             reservation_id=reservation_id,
             label=res_req.label,
-            allocations=claimed_allocations,
+            allocations=res_req.allocations,
             created_at=now,
         ))
 
@@ -292,9 +276,9 @@ def release(ledger: Ledger, reservation_id: str) -> Ledger:
     avail = list(ledger.availability)
 
     for claimed in target.allocations:
-        if claimed.device_name not in idx:
+        if claimed.name not in idx:
             continue
-        i = idx[claimed.device_name]
+        i = idx[claimed.name]
         da = avail[i]
         avail[i] = DeviceAvailability(
             device=da.device,

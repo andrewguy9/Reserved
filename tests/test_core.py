@@ -522,7 +522,7 @@ class TestStatus:
         assert r.id == result_grant.reservations[0].reservation_id
         assert r.label == "train"
         assert len(r.allocations) == 1
-        assert r.allocations[0].device_name == "cuda:0"
+        assert r.allocations[0].name == "cuda:0"
         assert r.allocations[0].ram_mb == 8192
 
     def test_status_no_reservations_initially(self):

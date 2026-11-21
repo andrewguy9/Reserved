@@ -14,7 +14,6 @@ import json
 from typing import Any
 
 from .core import (
-    ActiveReservation,
     DeviceAllocation,
     DeviceStatus,
     GrantFailure,
@@ -155,14 +154,7 @@ def status_result_to_wire(result: StatusResult) -> bytes:
                 "id": r.id,
                 "label": r.label,
                 "created_at": r.created_at,
-                "allocations": [
-                    {
-                        "device_name": s.device_name,
-                        "ram_mb": s.ram_mb,
-                        "compute_units": s.compute_units,
-                    }
-                    for s in r.allocations
-                ],
+                "allocations": [_allocation_to_wire(a) for a in r.allocations],
             }
             for r in result.reservations
         ],

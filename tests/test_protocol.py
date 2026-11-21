@@ -15,7 +15,6 @@ from reserved.core import (
     StatusResult,
     DeviceStatus,
     ReservationStatus,
-    ActiveReservation,
 )
 from reserved.protocol import (
     decode,
@@ -179,8 +178,8 @@ class TestStatusResultWire:
                     label="train",
                     created_at=1748000000.0,
                     allocations=(
-                        ActiveReservation.ClaimedAllocation(
-                            device_name="cuda:0",
+                        DeviceAllocation(
+                            name="cuda:0",
                             ram_mb=8192,
                             compute_units=50,
                         ),
@@ -203,7 +202,7 @@ class TestStatusResultWire:
         r = obj["reservations"][0]
         assert r["id"] == "a3f9c2"
         assert r["label"] == "train"
-        assert r["allocations"][0]["device_name"] == "cuda:0"
+        assert r["allocations"][0]["name"] == "cuda:0"
         assert r["allocations"][0]["ram_mb"] == 8192
 
 
