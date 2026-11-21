@@ -50,7 +50,7 @@ class TestEncodeDecodeRoundtrip:
         assert obj == {"ok": True}
 
     def test_roundtrip(self):
-        original = {"op": "reserve", "reservations": [{"label": "x", "slots": []}]}
+        original = {"op": "reserve", "reservations": [{"label": "x", "allocations": []}]}
         assert decode(encode(original)) == original
 
 
@@ -59,7 +59,7 @@ class TestReserveRequestWire:
         return ReserveRequest(reservations=(
             ReservationRequest(
                 label="train",
-                slots=(
+                allocations=(
                     DeviceAllocation(name="cuda:0", ram_mb=8192, compute_units=50),
                 ),
             ),
@@ -81,18 +81,18 @@ class TestReserveRequestWire:
         req = self._make_request()
         data = reserve_request_to_wire(req)
         obj = json.loads(data)
-        slot = obj["reservations"][0]["slots"][0]
+        slot = obj["reservations"][0]["allocations"][0]
         assert slot["name"] == "cuda:0"
         assert slot["ram_mb"] == 8192
         assert slot["compute_units"] == 50
 
     def test_deserialize_reserve_request(self):
-        wire = b'{"op":"reserve","reservations":[{"label":"lora","slots":[{"name":"cuda:1","ram_mb":2048,"compute_units":0}]}]}\n'
+        wire = b'{"op":"reserve","reservations":[{"label":"lora","allocations":[{"name":"cuda:1","ram_mb":2048,"compute_units":0}]}]}\n'
         obj = parse_request(wire)
         req = wire_to_reserve_request(obj)
         assert req.reservations[0].label == "lora"
-        assert req.reservations[0].slots[0].name == "cuda:1"
-        assert req.reservations[0].slots[0].ram_mb == 2048
+        assert req.reservations[0].allocations[0].name == "cuda:1"
+        assert req.reservations[0].allocations[0].ram_mb == 2048
 
     def test_serialize_deserialize_roundtrip(self):
         req = self._make_request()
@@ -100,13 +100,13 @@ class TestReserveRequestWire:
         obj = parse_request(wire)
         req2 = wire_to_reserve_request(obj)
         assert req2.reservations[0].label == req.reservations[0].label
-        assert req2.reservations[0].slots[0].name == req.reservations[0].slots[0].name
-        assert req2.reservations[0].slots[0].ram_mb == req.reservations[0].slots[0].ram_mb
+        assert req2.reservations[0].allocations[0].name == req.reservations[0].allocations[0].name
+        assert req2.reservations[0].allocations[0].ram_mb == req.reservations[0].allocations[0].ram_mb
 
     def test_multi_reservation_roundtrip(self):
         req = ReserveRequest(reservations=(
-            ReservationRequest(label="a", slots=(DeviceAllocation(name="cuda:0", ram_mb=4096),)),
-            ReservationRequest(label="b", slots=(DeviceAllocation(name="cuda:1", ram_mb=2048),)),
+            ReservationRequest(label="a", allocations=(DeviceAllocation(name="cuda:0", ram_mb=4096),)),
+            ReservationRequest(label="b", allocations=(DeviceAllocation(name="cuda:1", ram_mb=2048),)),
         ))
         wire = reserve_request_to_wire(req)
         obj = parse_request(wire)

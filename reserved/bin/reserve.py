@@ -97,7 +97,7 @@ def build_reserve_request(
             if isinstance(s, ExplicitSlot)
         ]
         return ReserveRequest(reservations=(
-            ReservationRequest(label=label, slots=tuple(allocations)),
+            ReservationRequest(label=label, allocations=tuple(allocations)),
         ))
 
     if devices is None:

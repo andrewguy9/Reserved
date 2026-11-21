@@ -55,7 +55,7 @@ def test_build_reserve_request_for_explicit_slots_preserves_order_and_capacity()
     req = build_reserve_request("job", slots, ConsolidateSolver())
 
     assert req.reservations == (
-        ReservationRequest(label="job", slots=(
+        ReservationRequest(label="job", allocations=(
             DeviceAllocation(name="cuda:1", ram_mb=4096, compute_units=25),
             DeviceAllocation(name="cpu", ram_mb=1024, compute_units=0),
         )),
@@ -66,7 +66,7 @@ def test_build_reserve_request_without_slots_is_valid_marker_reservation():
     req = build_reserve_request("marker", [], ConsolidateSolver())
 
     assert req.reservations == (
-        ReservationRequest(label="marker", slots=()),
+        ReservationRequest(label="marker", allocations=()),
     )
 
 
@@ -78,7 +78,7 @@ def test_build_reserve_request_delegates_constraints_to_solver():
         def solve(self, specs, devices):
             self.calls.append((specs, devices))
             return ReserveRequest(reservations=(
-                ReservationRequest(label=specs[0][0], slots=(
+                ReservationRequest(label=specs[0][0], allocations=(
                     DeviceAllocation(name=devices[0]["name"], ram_mb=specs[0][1][0].ram_mb),
                 )),
             ))
@@ -90,7 +90,7 @@ def test_build_reserve_request_delegates_constraints_to_solver():
     req = build_reserve_request("job", slots, solver, devices)
 
     assert solver.calls == [([("job", slots)], devices)]
-    assert req.reservations[0].slots[0] == DeviceAllocation(name="cuda:0", ram_mb=2048)
+    assert req.reservations[0].allocations[0] == DeviceAllocation(name="cuda:0", ram_mb=2048)
 
 
 def test_build_reserve_request_requires_status_for_constraints():

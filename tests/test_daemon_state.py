@@ -70,7 +70,7 @@ def reserve_wire(
             reservations=(
                 ReservationRequest(
                     label=label,
-                    slots=(
+                    allocations=(
                         DeviceAllocation(
                             name=device_name,
                             ram_mb=ram_mb,
@@ -89,11 +89,11 @@ def multi_reserve_wire() -> bytes:
             reservations=(
                 ReservationRequest(
                     label="train-a",
-                    slots=(DeviceAllocation(name="cuda:0", ram_mb=4096),),
+                    allocations=(DeviceAllocation(name="cuda:0", ram_mb=4096),),
                 ),
                 ReservationRequest(
                     label="train-b",
-                    slots=(DeviceAllocation(name="cuda:0", ram_mb=2048),),
+                    allocations=(DeviceAllocation(name="cuda:0", ram_mb=2048),),
                 ),
             )
         )
@@ -244,7 +244,7 @@ def test_failed_reserve_leaves_ledger_and_leases_unchanged():
 
 def test_malformed_reserve_closes_transport_without_corrupting_state():
     state = accept(make_state())
-    malformed = b'{"op":"reserve","reservations":[{"slots":[{"name":"cuda:0"}]}]}\n'
+    malformed = b'{"op":"reserve","reservations":[{"allocations":[{"name":"cuda:0"}]}]}\n'
 
     next_state, effects = step(state, TransportReceived("conn-1", malformed))
 

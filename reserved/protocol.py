@@ -63,16 +63,16 @@ def wire_to_reserve_request(obj: dict) -> ReserveRequest:
     raw_reservations = obj.get("reservations", [])
     reservations = []
     for r in raw_reservations:
-        slots = []
-        for s in r.get("slots", []):
-            slots.append(DeviceAllocation(
+        allocations = []
+        for s in r.get("allocations", []):
+            allocations.append(DeviceAllocation(
                 name=s["name"],
                 ram_mb=int(s.get("ram_mb", 0)),
                 compute_units=int(s.get("compute_units", 0)),
             ))
         reservations.append(ReservationRequest(
             label=r["label"],
-            slots=tuple(slots),
+            allocations=tuple(allocations),
         ))
     return ReserveRequest(reservations=tuple(reservations))
 
@@ -88,13 +88,13 @@ def reserve_request_to_wire(request: ReserveRequest) -> bytes:
         "reservations": [
             {
                 "label": r.label,
-                "slots": [
+                "allocations": [
                     {
                         "name": s.name,
                         "ram_mb": s.ram_mb,
                         "compute_units": s.compute_units,
                     }
-                    for s in r.slots
+                    for s in r.allocations
                 ],
             }
             for r in request.reservations

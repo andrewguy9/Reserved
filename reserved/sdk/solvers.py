@@ -110,7 +110,7 @@ class ConsolidateSolver:
 
             res_requests.append(ReservationRequest(
                 label=label,
-                slots=tuple(allocations),
+                allocations=tuple(allocations),
             ))
 
         return ReserveRequest(reservations=tuple(res_requests))
@@ -169,7 +169,7 @@ class SpreadSolver:
 
             res_requests.append(ReservationRequest(
                 label=label,
-                slots=tuple(allocations),
+                allocations=tuple(allocations),
             ))
 
         return ReserveRequest(reservations=tuple(res_requests))

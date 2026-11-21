@@ -45,7 +45,7 @@ class DeviceAllocation:
 class ReservationRequest:
     """One reservation in a reserve request."""
     label: str
-    slots: tuple[DeviceAllocation, ...]
+    allocations: tuple[DeviceAllocation, ...]
 
 
 @dataclass(frozen=True)
@@ -193,13 +193,13 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
     """
     Attempt to grant all reservations in *request* atomically.
 
-    Returns (new_ledger, GrantSuccess) if all slots can be satisfied, or
-    (original_ledger, GrantFailure) if any slot cannot be satisfied.
+    Returns (new_ledger, GrantSuccess) if all allocations can be satisfied, or
+    (original_ledger, GrantFailure) if any allocation cannot be satisfied.
     """
     idx = _availability_index(ledger)
     avail = list(ledger.availability)  # mutable working copy
 
-    # Collect all slots across all reservations for atomic checking.
+    # Collect all allocations across all reservations for atomic checking.
     # We'll simulate the subtraction in avail[] and roll back on failure.
     saved = {}  # name → original DeviceAvailability
 
@@ -208,27 +208,27 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
 
     # Pass 1: check and tentatively subtract.
     for res_req in request.reservations:
-        for slot in res_req.slots:
-            if slot.name not in idx:
-                return _fail(f"unknown device: {slot.name!r}")
-            i = idx[slot.name]
+        for allocation in res_req.allocations:
+            if allocation.name not in idx:
+                return _fail(f"unknown device: {allocation.name!r}")
+            i = idx[allocation.name]
             da = avail[i]
-            if slot.name not in saved:
-                saved[slot.name] = ledger.availability[i]
-            if da.available_ram_mb < slot.ram_mb:
+            if allocation.name not in saved:
+                saved[allocation.name] = ledger.availability[i]
+            if da.available_ram_mb < allocation.ram_mb:
                 return _fail(
-                    f"insufficient RAM on {slot.name!r}: "
-                    f"need {slot.ram_mb} MB, have {da.available_ram_mb} MB"
+                    f"insufficient RAM on {allocation.name!r}: "
+                    f"need {allocation.ram_mb} MB, have {da.available_ram_mb} MB"
                 )
-            if da.available_compute_units < slot.compute_units:
+            if da.available_compute_units < allocation.compute_units:
                 return _fail(
-                    f"insufficient compute_units on {slot.name!r}: "
-                    f"need {slot.compute_units}, have {da.available_compute_units}"
+                    f"insufficient compute_units on {allocation.name!r}: "
+                    f"need {allocation.compute_units}, have {da.available_compute_units}"
                 )
             avail[i] = DeviceAvailability(
                 device=da.device,
-                available_ram_mb=da.available_ram_mb - slot.ram_mb,
-                available_compute_units=da.available_compute_units - slot.compute_units,
+                available_ram_mb=da.available_ram_mb - allocation.ram_mb,
+                available_compute_units=da.available_compute_units - allocation.compute_units,
             )
 
     # Pass 2: build granted reservations.
@@ -242,22 +242,22 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
         granted_slots: list[GrantedSlot] = []
         claimed_slots: list[ActiveReservation.ClaimedSlot] = []
 
-        for slot in res_req.slots:
-            i = idx[slot.name]
+        for allocation in res_req.allocations:
+            i = idx[allocation.name]
             dev = avail[i].device
             if dev.type == "cuda":
                 # Name is guaranteed valid by load_ledger validation.
-                cuda_ordinal = int(slot.name.split(":")[1])
+                cuda_ordinal = int(allocation.name.split(":")[1])
             else:
                 cuda_ordinal = -1
             granted_slots.append(GrantedSlot(
-                device_name=slot.name,
+                device_name=allocation.name,
                 cuda_ordinal=cuda_ordinal,
             ))
             claimed_slots.append(ActiveReservation.ClaimedSlot(
-                device_name=slot.name,
-                ram_mb=slot.ram_mb,
-                compute_units=slot.compute_units,
+                device_name=allocation.name,
+                ram_mb=allocation.ram_mb,
+                compute_units=allocation.compute_units,
             ))
 
         granted_reservations.append(GrantedReservation(

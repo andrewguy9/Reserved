@@ -320,12 +320,12 @@ class Reservation:
 
         if self._all_explicit():
             # Skip solver step.
-            slots = [
+            allocations = [
                 DeviceAllocation(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
                 for s in self._slots
             ]
             req = ReserveRequest(reservations=(
-                ReservationRequest(label=self.label, slots=tuple(slots)),
+                ReservationRequest(label=self.label, allocations=tuple(allocations)),
             ))
         else:
             status = _query_status(socket_path)
@@ -586,11 +586,11 @@ class Request:
         from ..core import DeviceAllocation, ReservationRequest, ReserveRequest
         res_reqs = []
         for r in self._reservations:
-            slots = [
+            allocations = [
                 DeviceAllocation(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
                 for s in r._slots
             ]
-            res_reqs.append(ReservationRequest(label=r.label, slots=tuple(slots)))
+            res_reqs.append(ReservationRequest(label=r.label, allocations=tuple(allocations)))
         return ReserveRequest(reservations=tuple(res_reqs))
 
     def _solve(self, devices: list[dict]) -> ReserveRequest:
