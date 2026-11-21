@@ -13,7 +13,7 @@ from reserved.sdk import DeviceConstraint, Reservation
 
 with Reservation("cpu-example", DeviceConstraint("cpu", ram_mb=256)) as reservation:
     reservation.check()
-    print(f"holding 256 MB on {reservation.devices[0].device_name}", flush=True)
+    print(f"holding 256 MB on {reservation.devices[0].name}", flush=True)
     subprocess.run([sys.executable, "-m", "reserved.bin.reserve_status"], check=True)
 
 print("lease closed; the daemon will return the capacity")

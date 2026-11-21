@@ -20,6 +20,7 @@ dev = [
 reserved = "reserved.daemon:main"
 reserve = "reserved.bin.reserve:main"
 reserve-status = "reserved.bin.reserve_status:main"
+reserved-generate-config = "reserved.bin.generate_config:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

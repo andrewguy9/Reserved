@@ -9,14 +9,12 @@ from reserved.core import (
     GrantFailure,
     GrantSuccess,
     GrantedReservation,
-    GrantedSlot,
     ReservationRequest,
     ReserveRequest,
-    SlotRequest,
+    DeviceAllocation,
     StatusResult,
     DeviceStatus,
     ReservationStatus,
-    ActiveReservation,
 )
 from reserved.protocol import (
     decode,
@@ -24,7 +22,6 @@ from reserved.protocol import (
     grant_failure_to_wire,
     grant_success_to_wire,
     parse_request,
-    parse_response,
     reserve_request_to_wire,
     status_request_to_wire,
     status_result_to_wire,
@@ -50,7 +47,7 @@ class TestEncodeDecodeRoundtrip:
         assert obj == {"ok": True}
 
     def test_roundtrip(self):
-        original = {"op": "reserve", "reservations": [{"label": "x", "slots": []}]}
+        original = {"op": "reserve", "reservations": [{"label": "x", "allocations": []}]}
         assert decode(encode(original)) == original
 
 
@@ -59,8 +56,8 @@ class TestReserveRequestWire:
         return ReserveRequest(reservations=(
             ReservationRequest(
                 label="train",
-                slots=(
-                    SlotRequest(name="cuda:0", ram_mb=8192, compute_units=50),
+                allocations=(
+                    DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000000", ram_mb=8192, compute_units=50),
                 ),
             ),
         ))
@@ -77,22 +74,22 @@ class TestReserveRequestWire:
         obj = json.loads(data)
         assert obj["reservations"][0]["label"] == "train"
 
-    def test_serialize_slot_fields(self):
+    def test_serialize_allocation_fields(self):
         req = self._make_request()
         data = reserve_request_to_wire(req)
         obj = json.loads(data)
-        slot = obj["reservations"][0]["slots"][0]
-        assert slot["name"] == "cuda:0"
-        assert slot["ram_mb"] == 8192
-        assert slot["compute_units"] == 50
+        allocation = obj["reservations"][0]["allocations"][0]
+        assert allocation["name"] == "cuda:GPU-00000000-0000-0000-0000-000000000000"
+        assert allocation["ram_mb"] == 8192
+        assert allocation["compute_units"] == 50
 
     def test_deserialize_reserve_request(self):
-        wire = b'{"op":"reserve","reservations":[{"label":"lora","slots":[{"name":"cuda:1","ram_mb":2048,"compute_units":0}]}]}\n'
+        wire = b'{"op":"reserve","reservations":[{"label":"lora","allocations":[{"name":"cuda:GPU-00000000-0000-0000-0000-000000000001","ram_mb":2048,"compute_units":0}]}]}\n'
         obj = parse_request(wire)
         req = wire_to_reserve_request(obj)
         assert req.reservations[0].label == "lora"
-        assert req.reservations[0].slots[0].name == "cuda:1"
-        assert req.reservations[0].slots[0].ram_mb == 2048
+        assert req.reservations[0].allocations[0].name == "cuda:GPU-00000000-0000-0000-0000-000000000001"
+        assert req.reservations[0].allocations[0].ram_mb == 2048
 
     def test_serialize_deserialize_roundtrip(self):
         req = self._make_request()
@@ -100,13 +97,13 @@ class TestReserveRequestWire:
         obj = parse_request(wire)
         req2 = wire_to_reserve_request(obj)
         assert req2.reservations[0].label == req.reservations[0].label
-        assert req2.reservations[0].slots[0].name == req.reservations[0].slots[0].name
-        assert req2.reservations[0].slots[0].ram_mb == req.reservations[0].slots[0].ram_mb
+        assert req2.reservations[0].allocations[0].name == req.reservations[0].allocations[0].name
+        assert req2.reservations[0].allocations[0].ram_mb == req.reservations[0].allocations[0].ram_mb
 
     def test_multi_reservation_roundtrip(self):
         req = ReserveRequest(reservations=(
-            ReservationRequest(label="a", slots=(SlotRequest(name="cuda:0", ram_mb=4096),)),
-            ReservationRequest(label="b", slots=(SlotRequest(name="cuda:1", ram_mb=2048),)),
+            ReservationRequest(label="a", allocations=(DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000000", ram_mb=4096),)),
+            ReservationRequest(label="b", allocations=(DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000001", ram_mb=2048),)),
         ))
         wire = reserve_request_to_wire(req)
         obj = parse_request(wire)
@@ -128,7 +125,7 @@ class TestGrantSuccessWire:
             GrantedReservation(
                 reservation_id="a3f9c2",
                 label="train",
-                slots=(GrantedSlot(device_name="cuda:0", cuda_ordinal=0),),
+                allocations=(DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000000", ram_mb=8192, compute_units=50),),
                 created_at=1748000000.0,
             ),
         ))
@@ -143,15 +140,12 @@ class TestGrantSuccessWire:
         obj = json.loads(data)
         assert obj["reservations"][0]["reservation_id"] == "a3f9c2"
 
-    def test_slot_device_name(self):
+    def test_granted_allocation_matches_request_encoding(self):
         data = grant_success_to_wire(self._make_success())
         obj = json.loads(data)
-        assert obj["reservations"][0]["slots"][0]["device_name"] == "cuda:0"
-
-    def test_slot_cuda_ordinal(self):
-        data = grant_success_to_wire(self._make_success())
-        obj = json.loads(data)
-        assert obj["reservations"][0]["slots"][0]["cuda_ordinal"] == 0
+        assert obj["reservations"][0]["allocations"] == [
+            {"name": "cuda:GPU-00000000-0000-0000-0000-000000000000", "ram_mb": 8192, "compute_units": 50},
+        ]
 
 
 class TestGrantFailureWire:
@@ -168,9 +162,8 @@ class TestStatusResultWire:
         return StatusResult(
             devices=(
                 DeviceStatus(
-                    name="cuda:0",
+                    name="cuda:GPU-00000000-0000-0000-0000-000000000000",
                     type="cuda",
-                    model="rtx3090",
                     ram_mb=24576,
                     available_ram_mb=16384,
                     compute_units=100,
@@ -182,9 +175,9 @@ class TestStatusResultWire:
                     id="a3f9c2",
                     label="train",
                     created_at=1748000000.0,
-                    slots=(
-                        ActiveReservation.ClaimedSlot(
-                            device_name="cuda:0",
+                    allocations=(
+                        DeviceAllocation(
+                            name="cuda:GPU-00000000-0000-0000-0000-000000000000",
                             ram_mb=8192,
                             compute_units=50,
                         ),
@@ -197,7 +190,7 @@ class TestStatusResultWire:
         data = status_result_to_wire(self._make_status())
         obj = json.loads(data)
         d = obj["devices"][0]
-        assert d["name"] == "cuda:0"
+        assert d["name"] == "cuda:GPU-00000000-0000-0000-0000-000000000000"
         assert d["available_ram_mb"] == 16384
         assert d["available_compute_units"] == 50
 
@@ -207,8 +200,8 @@ class TestStatusResultWire:
         r = obj["reservations"][0]
         assert r["id"] == "a3f9c2"
         assert r["label"] == "train"
-        assert r["slots"][0]["device_name"] == "cuda:0"
-        assert r["slots"][0]["ram_mb"] == 8192
+        assert r["allocations"][0]["name"] == "cuda:GPU-00000000-0000-0000-0000-000000000000"
+        assert r["allocations"][0]["ram_mb"] == 8192
 
 
 class TestParseErrors:

@@ -14,5 +14,5 @@ from reserved.sdk.client import DeviceConstraint, Reservation
 
 
 with Reservation("metal-example", DeviceConstraint("metal", ram_mb=10240, compute_units=100)) as r:
-    print(f"got {r.devices[0].device_name}, reservation {r.reservation_id}")
+    print(f"got {r.devices[0].name}, reservation {r.reservation_id}")
     input("press enter to release...")

@@ -8,9 +8,13 @@ import types
 
 import pytest
 
-from reserved.sdk.client import GrantedDevice, Reservation, _connect
+from reserved.core import DeviceAllocation
+from reserved.sdk.client import Reservation, _connect, torch_device
 from reserved.sdk.errors import DaemonNotRunningError, ReservationError, ReservationExpiredError
 import reserved.sdk.client as client_module
+from tests.cuda_support import cuda_name, fake_torch
+
+CUDA0, CUDA1, CUDA2, CUDA5 = (cuda_name(n) for n in (0, 1, 2, 5))
 
 
 def test_connect_translates_missing_socket_to_domain_error(monkeypatch):
@@ -27,63 +31,62 @@ def test_connect_translates_missing_socket_to_domain_error(monkeypatch):
         _connect("/missing.sock")
 
 
-def test_cpu_and_metal_pytorch_devices_ignore_cuda_visibility(monkeypatch):
+def test_cpu_and_metal_pytorch_devices_do_not_touch_torch_cuda(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=str))
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
 
-    assert GrantedDevice("metal:0", -1).torch_device() == "mps"
-    assert GrantedDevice("cpu", -1).torch_device() == "cpu"
+    assert torch_device(DeviceAllocation("metal:0")) == "mps"
+    assert torch_device(DeviceAllocation("cpu")) == "cpu"
 
 
-@pytest.mark.parametrize(("cuda_visibility", "logical_device"), [
-    pytest.param(None, "cuda:2", id="unmasked"),
-    pytest.param("2", "cuda:0", id="only-physical-2-visible"),
-    pytest.param("5,2", "cuda:1", id="physical-5-visible-first"),
+@pytest.mark.parametrize(("visible", "logical_device"), [
+    pytest.param((CUDA0, CUDA1, CUDA2), "cuda:2", id="all-visible"),
+    pytest.param((CUDA2,), "cuda:0", id="only-granted-visible"),
+    pytest.param((CUDA5, CUDA2), "cuda:1", id="reordered-mask"),
 ])
-def test_same_physical_cuda_grant_maps_to_the_process_local_device(
-    monkeypatch, cuda_visibility, logical_device,
-):
-    if cuda_visibility is None:
-        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    else:
-        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", cuda_visibility)
-    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=str))
+def test_cuda_grant_maps_to_the_torch_device_with_its_uuid(monkeypatch, visible, logical_device):
+    monkeypatch.setitem(sys.modules, "torch", fake_torch(*visible))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "not-consulted-by-the-sdk")
 
-    physical_grant = GrantedDevice(device_name="cuda:2", cuda_ordinal=2)
+    grant = DeviceAllocation(CUDA2, ram_mb=1024)
 
-    assert physical_grant.torch_device() == logical_device
-    assert physical_grant.device_name == "cuda:2"
-    assert physical_grant.cuda_ordinal == 2
+    assert torch_device(grant) == logical_device
 
 
-@pytest.mark.parametrize(("mask", "reason"), [
-    ("", "not visible"),
-    ("-1", "not visible"),
-    ("0,5", "not visible"),
-    ("GPU-abc", "invalid"),
-    ("MIG-abc", "invalid"),
-    ("2,", "invalid"),
-    ("2,-1,5", "invalid"),
-    ("2,02", "invalid"),
-    ("2147483648,2", "invalid"),
-    ("٢,2", "invalid"),
-])
-def test_granted_device_rejects_hidden_or_ambiguous_cuda_mapping(monkeypatch, mask, reason):
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", mask)
-    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=str))
+def test_cuda_grant_hidden_from_torch_raises(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", fake_torch(CUDA0, CUDA1))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
 
-    with pytest.raises(ReservationError, match=reason) as error:
-        GrantedDevice("cuda:2", 2).torch_device()
+    with pytest.raises(ReservationError, match="not visible") as error:
+        torch_device(DeviceAllocation(CUDA2))
 
-    assert "'cuda:2'" in str(error.value)
-    assert f"CUDA_VISIBLE_DEVICES={mask!r}" in str(error.value)
+    assert repr(CUDA2) in str(error.value)
+    assert "CUDA_VISIBLE_DEVICES='0,1'" in str(error.value)
 
 
-def test_granted_device_rejects_unsupported_torch_device(monkeypatch):
+def test_torch_without_device_uuids_raises(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", fake_torch(CUDA2, with_uuid=False))
+
+    with pytest.raises(ReservationError, match="does not report CUDA device UUIDs"):
+        torch_device(DeviceAllocation(CUDA2))
+
+
+def test_torch_device_rejects_malformed_cuda_name(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", fake_torch(CUDA2))
+
+    with pytest.raises(ReservationError, match="invalid CUDA device name"):
+        torch_device(DeviceAllocation("cuda:2"))
+
+
+def test_torch_device_rejects_unsupported_torch_device(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=str))
 
     with pytest.raises(ReservationError, match="fpga:0"):
-        GrantedDevice("fpga:0", -1).torch_device()
+        torch_device(DeviceAllocation("fpga:0"))
+
+
+def test_reservation_rejects_arguments_that_are_not_constraints():
+    with pytest.raises(TypeError, match="DeviceConstraint"):
+        Reservation("job", DeviceAllocation("cpu", ram_mb=1024))
 
 
 def test_reservation_release_closes_lease_socket_and_is_idempotent():

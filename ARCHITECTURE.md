@@ -19,10 +19,10 @@
 
 ### Explicit language (daemon protocol)
 
-The daemon speaks only in explicit terms. Every slot names a physical device and states exactly how much capacity to claim:
+The daemon speaks only in explicit terms. Every allocation names a physical device and states exactly how much capacity to claim:
 
 ```
-slot: name=cuda:0  ram_mb=8192  compute_units=50
+allocation: name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  ram_mb=8192  compute_units=50
 ```
 
 No wildcards. No type matching. The daemon checks whether the named device has sufficient capacity and subtracts if so.
@@ -32,20 +32,20 @@ No wildcards. No type matching. The daemon checks whether the named device has s
 Users typically don't know or care which physical device they get — they just need a CUDA device with enough VRAM:
 
 ```
-slot: type=cuda  ram_mb=8192
-slot: type=cuda  model=rtx3090
+constraint: type=cuda  ram_mb=8192
+constraint: name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782  ram_mb=8192
 ```
 
-A **constraint solver** resolves constraints against current device status and produces an explicit request before submitting to the daemon.
+Every field narrows the choice: `type` matches the device config, `name` pins one physical device, and `ram_mb` and `compute_units` must fit its available capacity. A **constraint solver** resolves constraints against current device status and produces an explicit request before submitting to the daemon. The SDK and CLI accept only constraints; a pinned device is a constraint with a `name`.
 
 ### Constraint solvers
 
 | Solver | Behaviour | Default |
 | --- | --- | --- |
-| `ConsolidateSolver` | Packs slots onto as few devices as possible | Yes |
-| `SpreadSolver` | Distributes slots across as many devices as possible | No |
+| `ConsolidateSolver` | Packs allocations onto as few devices as possible | Yes |
+| `SpreadSolver` | Distributes allocations across as many devices as possible | No |
 
-Any caller can bypass solvers by submitting an explicit request directly to the daemon — this is what sophisticated orchestrators do after running their own placement algorithm.
+An orchestrator that runs its own placement expresses the result as `name` constraints, or speaks the explicit protocol to the daemon directly.
 
 ```
 Constraint spec  →  Solver (reads status)  →  Explicit request  →  Daemon (check-and-subtract)
@@ -62,14 +62,14 @@ The daemon is unaware of solvers. New solvers can be added without any daemon ch
 ```
 Request
 └── Reservation  (one per independent lifetime)
-    └── Slot     (one per physical device)
+    └── Allocation  (one per physical device)
         └── Resource  (ram_mb, compute_units claimed)
 ```
 
 - **Request** — atomic unit. All reservations granted together or all rejected. One wire message.
 - **Reservation** — named grouping with its own lease fd. Granted atomically, released independently. The caller declares boundaries based on intended lifetime.
-- **Slot** — one physical device. All slots in a reservation are released when its lease fd closes.
-- **Resource** — capacity claimed on the slot's device. Multiple slots can share a physical device as long as combined capacity fits.
+- **Allocation** — one physical device and the capacity claimed on it. All allocations in a reservation are released when its lease fd closes. The same `DeviceAllocation` record is what the client requests, the daemon grants, the ledger holds, and status reports.
+- **Resource** — capacity claimed on the allocation's device. Multiple allocations can share a physical device as long as combined capacity fits.
 
 ---
 
@@ -85,11 +85,11 @@ Line-delimited JSON over a Unix domain socket. Each message is one JSON object t
   "reservations": [
     {
       "label": "checkpoint",
-      "slots": [{ "name": "cuda:2", "ram_mb": 8192, "compute_units": 50 }]
+      "allocations": [{ "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 8192, "compute_units": 50 }]
     },
     {
       "label": "lora",
-      "slots": [{ "name": "cuda:2", "ram_mb": 2048, "compute_units": 0 }]
+      "allocations": [{ "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 2048, "compute_units": 0 }]
     }
   ]
 }
@@ -104,19 +104,22 @@ Line-delimited JSON over a Unix domain socket. Each message is one JSON object t
     {
       "reservation_id": "a3f9c2",
       "label": "checkpoint",
-      "slots": [{ "device_name": "cuda:2", "cuda_ordinal": 2 }]
+      "allocations": [{ "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 8192, "compute_units": 50 }]
     },
     {
       "reservation_id": "b7e1d4",
       "label": "lora",
-      "slots": [{ "device_name": "cuda:2", "cuda_ordinal": 2 }]
+      "allocations": [{ "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", "ram_mb": 2048, "compute_units": 0 }]
     }
   ]
 }
 ```
 
-`device_name` identifies the physical grant. `cuda_ordinal` is its physical
-CUDA ordinal (for example, `2` for `cuda:2`) or `-1` for a non-CUDA grant.
+Each granted allocation is the requested record echoed back: the same
+`name`, `ram_mb`, and `compute_units`. The name is the physical identity of
+the device. For CUDA it is `cuda:GPU-<uuid>`, the UUID printed by
+`nvidia-smi -L`, which `CUDA_VISIBLE_DEVICES` accepts directly and torch
+reports for each visible device. Nothing else identifies a device.
 
 **Reserve response (failure):**
 
@@ -184,27 +187,34 @@ See [Getting started](GETTING_STARTED.md#hold-capacity-for-a-model-worker).
 
 ## CUDA device indexing
 
-Physical device names identify hardware in the config, CLI `name=` slots,
-solver, ledger, protocol, and SDK grant metadata. For example,
-`reserve infer name=cuda:2 -- python infer.py` claims physical `cuda:2`.
-The CLI exports that name in `RESERVED_DEVICE` and `RESERVED_DEVICES`, and
-passes the physical grant metadata in `RESERVED_GRANTED_SLOTS` for SDK
-adoption. `CUDA_VISIBLE_DEVICES=2` exposes the granted GPU to the worker.
-Multiple CUDA slots contribute distinct physical ordinals in first-grant order.
+Physical device names identify hardware in the config, CLI `name=` specs,
+solver, ledger, protocol, and SDK grant metadata. A CUDA name is
+`cuda:GPU-<uuid>`. The UUID is the one `nvidia-smi -L` prints, so it names one
+specific board regardless of the driver's enumeration order, and
+`CUDA_VISIBLE_DEVICES` accepts it directly. For example,
+`reserve infer name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782 -- python infer.py`
+claims that card. The CLI exports the name in `RESERVED_DEVICE` and
+`RESERVED_DEVICES`, passes the granted allocations in
+`RESERVED_GRANTED_ALLOCATIONS` for SDK adoption, and sets
+`CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` so the worker sees only
+the granted GPU. Multiple CUDA allocations contribute distinct UUIDs in first-grant
+order.
 
-`GrantedDevice.torch_device()` is the conversion boundary. It maps the
-physical ordinal to its zero-based position in the current process's CUDA
-mask. The worker above gets `torch.device("cuda:0")`. A process with
-`CUDA_VISIBLE_DEVICES=5,2` gets `torch.device("cuda:1")` for the same physical
-grant. `Reservation.torch_devices()` applies the conversion in grant order.
-Multiple slots on the same GPU resolve to the same logical index.
+`torch_device(allocation)` is the conversion boundary; `reservation.devices` holds the granted `DeviceAllocation` records it takes. It enumerates the
+CUDA devices torch can see, reads each one's UUID from its device properties,
+and returns the index whose UUID matches the grant. The worker above gets
+`torch.device("cuda:0")`. A process started with
+`CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781,GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782`
+gets `torch.device("cuda:1")` for the same grant, and a process with no mask
+gets the card's position in torch's full enumeration. `Reservation.torch_devices()`
+applies the conversion in grant order. Multiple allocations on the same GPU resolve
+to the same logical index.
 
-An unset mask uses the physical ordinal as the logical index, assuming the
-unmasked CUDA order matches the configured physical ordinals. Configure
-visibility before CUDA initializes. The SDK checks that the mask is a list of
-distinct nonnegative decimal ordinals and that the grant appears in it. Empty
-and `-1` masks hide all CUDA devices. Hidden grants and unsupported masks
-raise `ReservationError`.
+The SDK never reads or writes `CUDA_VISIBLE_DEVICES`; it only reports the mask
+in error messages. Resolving a CUDA grant initializes CUDA in the calling
+process, so it belongs in the process that will use the GPU. A grant torch
+cannot see and a torch build that does not report device UUIDs raise
+`ReservationError`.
 
 ---
 
@@ -225,46 +235,60 @@ def release(ledger, reservation_id) -> Ledger: ...
 def status(ledger) -> StatusResult: ...
 ```
 
-`grant()` does a two-pass atomic check-and-subtract. If any slot fails, the original ledger is returned unchanged.
+`grant()` does a two-pass atomic check-and-subtract. If any allocation fails, the original ledger is returned unchanged.
 
 Fully testable as plain function calls — no daemon, no sockets, no hardware required.
 
-### Imperative shell (`daemon.py`)
+### State layer (`daemon_state.py`)
 
-Owns the single mutable ledger reference and the `select` loop. Calls core functions and swaps the ledger reference with the result.
+Between the core and the sockets sits a pure state machine. One daemon step is a function of logical state and one event, returning new state and the effects the IO shell must perform:
 
-```python
-ledger = core.load_ledger(config)
-
-# on reserve request:
-ledger, result = core.grant(ledger, request)
-
-# on lease fd EOF:
-ledger = core.release(ledger, reservation_id)
+```text
+DaemonState + Event -> DaemonState + Effects
 ```
 
-No allocation logic in the shell — only IO, fd lifecycle, and ledger swapping.
+`DaemonState` holds the ledger, the open transports (connection id and buffered bytes), and the open leases (lease id and reservation id). It never holds a socket or a file descriptor: descriptors are process-local, recyclable integers, so the state layer identifies connections and leases by logical ids and the shell keeps the mapping to real sockets in a handle table.
+
+Events are what the shell observed: `Accepted`, `TransportReceived`, `TransportClosed`, `LeaseClosed`. Effects are what the shell must do: `SendBytes`, `CreateLease`, `SendLeaseFds`, `CloseTransport`, `CloseLease`.
+
+The three flows:
+
+- **Reserve.** Parse the request, call `core.grant()`. On failure the ledger is unchanged and the effects are a failure response and `CloseTransport`. On success the state carries the new ledger and one lease record per granted reservation, and the effects are `CreateLease` per lease, one `SendLeaseFds` with the response, and `CloseTransport`.
+- **Status.** Call `core.status()`, emit the response and `CloseTransport`. Ledger and leases unchanged.
+- **Lease close.** Look up the lease, `core.release()` its reservation, drop the lease record, emit `CloseLease`. This is the lifecycle invariant: a reservation exists exactly while its lease is open.
+
+A request that arrives without its terminating newline only extends the transport's buffer; nothing executes until the line is complete. Malformed input produces a failure response and no ledger change.
+
+`tests/test_daemon_state.py` exercises all of this as plain function calls, with no sockets.
+
+### IO shell (`daemon.py`)
+
+The shell owns the real sockets and the `select` loop. It translates readable descriptors into events, calls `daemon_state.step()`, and applies the returned effects: `CreateLease` makes a `socketpair()` and files the daemon end under the lease id, `SendLeaseFds` sends the client ends with `SCM_RIGHTS`, `SendBytes` writes a response, and the close effects close sockets and update the handle table. It also owns socket acquisition, signals, and the optional HTTP status server.
+
+No allocation logic and no state transitions live in the shell — only IO, descriptor lifecycle, and effect application. `tests/test_daemon_startup.py` and the inherited-lease tests exercise it against a real daemon process.
 
 ### Module structure
 
 ```
 reserved/
-  core.py        # pure functions, immutable Ledger
-  daemon.py      # imperative shell, select loop, SCM_RIGHTS
+  core.py          # pure functions, immutable Ledger
+  daemon_state.py  # pure state machine: DaemonState + Event -> DaemonState + Effects
+  daemon.py        # IO shell: sockets, select loop, SCM_RIGHTS, effect application
   paths.py       # socket discovery shared by daemon, SDK, and CLIs
   protocol.py    # single-line JSON serialization (explicit types only)
   sdk/
-    client.py    # Reservation, Request, DeviceConstraint, ExplicitSlot
+    client.py    # Reservation, Request, DeviceConstraint, torch_device
     solvers.py   # ConsolidateSolver, SpreadSolver
     errors.py    # ReservationError, DaemonNotRunningError, ReservationExpiredError
   bin/
     reserve.py       # CLI: constraint solver + exec wrapper
     reserve_status.py  # CLI: status query
+    generate_config.py # reserved-generate-config: config from detected hardware
 ```
 
 ### Language boundaries
 
-The constraint language never crosses a process boundary. `DeviceConstraint`, `ExplicitSlot`, and solver classes are in-process Python objects only — never serialized. Only explicit requests hit the wire. `protocol.py` never touches constraint types.
+The constraint language never crosses a process boundary. `DeviceConstraint` and the solver classes are in-process Python objects only — never serialized. Only explicit requests of `DeviceAllocation` records hit the wire. `protocol.py` never touches constraint types.
 
 ---
 

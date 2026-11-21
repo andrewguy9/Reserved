@@ -12,7 +12,7 @@ A single-machine, best-effort resource reservation daemon for physical hardware 
 installation from GitHub, a walkthrough requiring no GPU, and guidance
 on integrating an application or model worker.
 
-For installation and service management, see [INSTALL.md](INSTALL.md). For the detailed design, see [ARCHITECTURE.md](ARCHITECTURE.md). The original proposal is in [RESERVED_DESIGN.md](RESERVED_DESIGN.md).
+For installation and service management, see [INSTALL.md](INSTALL.md). For the implementation reference, see [ARCHITECTURE.md](ARCHITECTURE.md). For the design and its rationale, see [RESERVED_DESIGN.md](RESERVED_DESIGN.md).
 
 ---
 
@@ -114,12 +114,17 @@ verification using [INSTALL.md](INSTALL.md).
 ```json
 {
   "devices": [
-    { "name": "cuda:0", "type": "cuda", "model": "rtx3090", "ram_mb": 24576, "compute_units": 100 },
-    { "name": "cuda:1", "type": "cuda", "model": "rtx3090", "ram_mb": 24576, "compute_units": 100 },
-    { "name": "cpu",    "type": "cpu",                       "ram_mb": 65536 }
+    { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", "type": "cuda", "ram_mb": 24576, "compute_units": 100 },
+    { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781", "type": "cuda", "ram_mb": 24576, "compute_units": 100 },
+    { "name": "cpu", "type": "cpu", "ram_mb": 65536 }
   ]
 }
 ```
+
+CUDA devices are named by GPU UUID, exactly as `nvidia-smi -L` prints it, so a
+name identifies one specific card regardless of driver enumeration order.
+`reserved-generate-config` writes this config for the CUDA cards torch can see,
+with each card's memory as `ram_mb` and its multiprocessor count as `compute_units`.
 
 Create `~/.config/reserved` with `mkdir -p ~/.config/reserved` and save the JSON
 as `reserved.json` there (or pass `--config PATH`). Adapt the devices and budgets
@@ -156,15 +161,14 @@ reserve-status
 `reserve` wraps any command under a reservation. Use it for programs that do not know about the SDK. It acquires a single reservation, sets environment variables for the child process, then replaces itself with the target command.
 
 ```
-reserve LABEL [SLOT ...] [--solver consolidate|spread] [--socket PATH] -- CMD [ARGS...]
+reserve LABEL [DEVICE ...] [--solver consolidate|spread] [--socket PATH] -- CMD [ARGS...]
 ```
 
-Each `SLOT` is a comma-separated set of constraints:
+Each `DEVICE` is one allocation in the reservation, written as comma-separated fields:
 
 | Field | Effect |
 | --- | --- |
 | `type=TYPE` | Device type: `cuda`, `metal`, or `cpu` |
-| `model=MODEL` | Device model label (e.g. `rtx3090`) |
 | `ram=MB` | Minimum available RAM in MB |
 | `compute=N` | Minimum available compute units |
 | `name=NAME` | Pin to a physical device by its configured name |
@@ -179,14 +183,11 @@ reserve infer type=metal -- python infer.py
 # Needs 30GB VRAM
 reserve train type=cuda,ram=30720 -- python train.py
 
-# Specific model
-reserve infer type=cuda,model=rtx3090 -- python infer.py
-
 # Pin to a physical device
-reserve infer name=cuda:2 -- python infer.py
+reserve infer name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782 -- python infer.py
 
 # Two distinct CUDA devices (distributed job)
-reserve distributed name=cuda:0,ram=1024 name=cuda:1,ram=1024 -- python distributed.py
+reserve distributed name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780,ram=1024 name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781,ram=1024 -- python distributed.py
 
 # Prefer spreading across cards when capacity allows
 reserve pipeline type=cuda type=cuda --solver spread -- python pipeline.py
@@ -199,16 +200,17 @@ configs and a PyTorch worker for one or two cards.
 
 | Variable | Value |
 | --- | --- |
-| `CUDA_VISIBLE_DEVICES` | Distinct physical CUDA ordinals in first-grant order, defining the child's CUDA view |
+| `CUDA_VISIBLE_DEVICES` | Distinct GPU UUIDs of the granted CUDA devices in first-grant order, defining the child's CUDA view |
 | `RESERVED_DEVICE` | Physical name of the first granted accelerator, or the first device for a CPU-only grant |
 | `RESERVED_DEVICES` | Comma-separated physical device names in grant order |
-| `RESERVED_GRANTED_SLOTS` | JSON array of physical grant metadata for SDK adoption |
+| `RESERVED_GRANTED_ALLOCATIONS` | JSON array of granted allocations (`name`, `ram_mb`, `compute_units`) for SDK adoption |
 | `RESERVED_ID` | Reservation ID |
 | `RESERVED_FD` | File descriptor number of the lease fd |
 
-For `reserve infer name=cuda:2 -- python infer.py`, the daemon grants physical
-`cuda:2`. The worker sees `RESERVED_DEVICE=cuda:2`, `RESERVED_DEVICES=cuda:2`,
-and `CUDA_VISIBLE_DEVICES=2`. PyTorch uses logical `cuda:0` in that process.
+For `reserve infer name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782 -- python infer.py`, the daemon
+grants that card. The worker sees `RESERVED_DEVICE` and `RESERVED_DEVICES` set
+to `cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` and `CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782`.
+PyTorch uses logical `cuda:0` in that process.
 
 ---
 
@@ -217,7 +219,7 @@ and `CUDA_VISIBLE_DEVICES=2`. PyTorch uses logical `cuda:0` in that process.
 Use the SDK when an application can participate in reservations directly. The SDK talks to the daemon, holds the lease fd for the lifetime of each `Reservation`, and exposes granted devices to application code.
 
 ```python
-from reserved.sdk.client import Reservation, Request, DeviceConstraint, ExplicitSlot
+from reserved.sdk import Reservation, Request, DeviceConstraint
 from reserved.sdk.errors import ReservationError, DaemonNotRunningError, ReservationExpiredError
 ```
 
@@ -226,22 +228,22 @@ from reserved.sdk.errors import ReservationError, DaemonNotRunningError, Reserva
 ```python
 # Any CUDA device
 with Reservation("infer", DeviceConstraint("cuda")) as r:
-    model.to(r.devices[0].torch_device())
+    model.to(r.torch_devices()[0])
     run_model()
 
 # Metal (Apple Silicon)
 with Reservation("infer", DeviceConstraint("metal")) as r:
-    model.to(r.devices[0].torch_device())   # torch.device("mps")
+    model.to(r.torch_devices()[0])   # torch.device("mps")
     run_model()
 
 # Needs 30GB VRAM
 with Reservation("infer", DeviceConstraint("cuda", ram_mb=30720)) as r:
-    model.to(r.devices[0].torch_device())
+    model.to(r.torch_devices()[0])
     ...
 
 # Two distinct CUDA devices, released together
-with Reservation("distributed", ExplicitSlot("cuda:0", ram_mb=1024),
-                 ExplicitSlot("cuda:1", ram_mb=1024)) as r:
+with Reservation("distributed", DeviceConstraint(name="cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", ram_mb=1024),
+                 DeviceConstraint(name="cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781", ram_mb=1024)) as r:
     devices = r.torch_devices()
     run_distributed(devices)
 ```
@@ -274,10 +276,13 @@ that capacity before releasing it; Reserved does not free GPU memory itself.
 
 ### Explicit placement (orchestrator)
 
+A constraint with `name=` pins one physical device. The solver only checks
+that the capacity fits, and the daemon checks again when it grants.
+
 ```python
 # Pin directly to a physical device
-with Reservation("infer", ExplicitSlot("cuda:2", ram_mb=8192)) as r:
-    model.to(r.devices[0].torch_device())
+with Reservation("infer", DeviceConstraint(name="cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", ram_mb=8192)) as r:
+    model.to(r.torch_devices()[0])
     run_model()
 ```
 
@@ -303,24 +308,28 @@ executable cannot accidentally keep the grant alive. A forked child still
 gets a copy, so capacity returns when the last copy closes.
 
 The adopted reservation exposes `reservation_id` from `RESERVED_ID` and
-physical grants from `RESERVED_GRANTED_SLOTS`. Update the `reserve` launcher
+physical grants from `RESERVED_GRANTED_ALLOCATIONS`. Update the `reserve` launcher
 and the worker SDK together. Adoption requires this grant metadata and
-accepts an empty array for a reservation with zero slots.
+accepts an empty array for a reservation with zero allocations.
 See the [getting-started walkthrough](GETTING_STARTED.md#adopt-the-lease-in-a-python-worker).
 
 ### PyTorch device selection
 
-For either acquisition path, `reservation.devices` holds physical grant
-metadata for placement and diagnostics. Pass the result of
+For either acquisition path, `reservation.devices` holds the granted physical
+device names for placement and diagnostics. Pass the result of
 `reservation.torch_devices()` to PyTorch. It returns one process-local device
-per granted slot, in grant order. For example, with `CUDA_VISIBLE_DEVICES=5,2`,
-physical `cuda:2` becomes logical `cuda:1`. When the mask is unset, the
-helper uses the physical ordinal as the PyTorch index.
+per granted allocation, in grant order. A CUDA grant resolves to the device
+torch reports with the same GPU UUID, so the mapping is correct whether
+`CUDA_VISIBLE_DEVICES` is unset, set by the `reserve` launcher, or set by a
+scheduler. For example, with `CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781,GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782`,
+a grant of `cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` becomes logical `cuda:1`.
 
-Set CUDA visibility before CUDA initializes. The SDK accepts masks made of
-distinct nonnegative decimal ordinals. An empty mask or `-1` hides all CUDA
-devices. Hidden grants, malformed masks, UUID masks, and MIG masks raise
-`ReservationError`.
+`torch_devices()` expects PyTorch to be installed in the calling process; the
+package does not declare or install it. Acquiring, checking, and releasing
+reservations never import torch. Resolving a CUDA grant initializes CUDA in the
+calling process, so call `torch_devices()` in the process that will use the
+GPU. A grant that torch cannot see, and a torch build that does not report
+device UUIDs, raise `ReservationError`.
 
 For PyTorch device selection, use `cpu` or a `cpu:` name for CPU grants and
 `metal:0` for Metal grants. Unsupported device names raise `ReservationError`.
@@ -353,12 +362,12 @@ reserve-status [--socket PATH] [--json]
 
 ```
 Devices:
-  cuda:0  cuda  rtx3090  available: 16384/24576 MB  100/100 compute
-  cuda:1  cuda  rtx3090  available: 24576/24576 MB  100/100 compute
+  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  cuda  available: 16384/24576 MB  100/100 compute
+  cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781  cuda  available: 24576/24576 MB  100/100 compute
 
 Reservations:
   a3f9c2  label=train  age=2m14s
-    cuda:0  8192 MB
+    cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  8192 MB
 ```
 
 Use `--json` for scripting:
@@ -375,9 +384,8 @@ Devices have the following fields:
 
 | Field | Description |
 | --- | --- |
-| `name` | Unique physical identifier. CUDA uses `cuda:N` with the physical ordinal. Metal uses `metal:0`. |
+| `name` | Unique physical identifier. CUDA uses `cuda:GPU-<uuid>` with the lowercase UUID printed by `nvidia-smi -L`. Metal uses `metal:0`. |
 | `type` | `cuda`, `metal`, or `cpu` |
-| `model` | Optional label for the hardware class |
 | `ram_mb` | Total reservable RAM (VRAM for CUDA, unified memory for Metal, system RAM for CPU) |
 | `compute_units` | Optional opaque budget — convention between operator and callers |
 
@@ -386,8 +394,8 @@ Devices have the following fields:
 ```json
 {
   "devices": [
-    { "name": "metal:0", "type": "metal", "model": "m3-max", "ram_mb": 36864, "compute_units": 100 },
-    { "name": "cpu",     "type": "cpu",                       "ram_mb": 65536 }
+    { "name": "metal:0", "type": "metal", "ram_mb": 36864, "compute_units": 100 },
+    { "name": "cpu", "type": "cpu", "ram_mb": 65536 }
   ]
 }
 ```

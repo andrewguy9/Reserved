@@ -55,21 +55,21 @@ def fetch_dashboard(ledger):
     return html, parser.tables
 
 
-@pytest.mark.parametrize("slots, expected", [
-    ((core.ActiveReservation.ClaimedSlot("cuda:0", 1024, 1),), [
-        ["abc123", "infer", "1m0s", "cuda:0", "1024 MB", "1"],
+@pytest.mark.parametrize("allocations, expected", [
+    ((core.DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000000", 1024, 1),), [
+        ["abc123", "infer", "1m0s", "cuda:GPU-00000000-0000-0000-0000-000000000000", "1024 MB", "1"],
     ]),
-    ((core.ActiveReservation.ClaimedSlot("cuda:0", 1024, 1),
-      core.ActiveReservation.ClaimedSlot("cuda:2", 2048, 0)), [
-        ["abc123", "infer", "1m0s", "cuda:0", "1024 MB", "1"],
-        ["abc123", "infer", "1m0s", "cuda:2", "2048 MB", "0"],
+    ((core.DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000000", 1024, 1),
+      core.DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000002", 2048, 0)), [
+        ["abc123", "infer", "1m0s", "cuda:GPU-00000000-0000-0000-0000-000000000000", "1024 MB", "1"],
+        ["abc123", "infer", "1m0s", "cuda:GPU-00000000-0000-0000-0000-000000000002", "2048 MB", "0"],
     ]),
     ((), [["abc123", "infer", "1m0s", "—", "—", "—"]]),
 ])
-def test_reservation_values_match_their_column_headers(monkeypatch, slots, expected):
+def test_reservation_values_match_their_column_headers(monkeypatch, allocations, expected):
     monkeypatch.setattr(daemon.time, "time", lambda: 160.0)
     ledger = core.Ledger(availability=(), reservations=(
-        core.ActiveReservation("abc123", "infer", slots, 100.0),
+        core.ActiveReservation("abc123", "infer", allocations, 100.0),
     ))
 
     _, tables = fetch_dashboard(ledger)
@@ -91,17 +91,16 @@ def test_device_text_and_reservation_labels_are_displayed_literally():
     name = "cpu<&>"
     label = '<script>alert("job")</script> & train'
     ledger = core.load_ledger({"devices": [
-        {"name": name, "type": "cpu", "model": "<board>", "ram_mb": 2048},
+        {"name": name, "type": "cpu", "ram_mb": 2048},
     ]})
     ledger, result = core.grant(ledger, core.ReserveRequest(reservations=(
-        core.ReservationRequest(label, (core.SlotRequest(name, ram_mb=256),)),
+        core.ReservationRequest(label, (core.DeviceAllocation(name, ram_mb=256),)),
     )))
     assert result.ok
 
     html, tables = fetch_dashboard(ledger)
 
-    assert tables[0][1] == [name, "cpu", "<board>", "1792/2048 MB", "0/0"]
+    assert tables[0][1] == [name, "cpu", "1792/2048 MB", "0/0"]
     assert tables[1][1][1] == label
     assert tables[1][1][3:] == [name, "256 MB", "0"]
     assert "<script>" not in html
-    assert "<board>" not in html

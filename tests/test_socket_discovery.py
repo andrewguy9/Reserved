@@ -103,7 +103,7 @@ def test_sdk_acquires_and_releases_through_default_fallback(discovery, atomic):
         else:
             reservation.__enter__()
         reservation.check()
-        assert reservation.devices[0].device_name == "cpu"
+        assert reservation.devices[0] == sdk.DeviceAllocation("cpu", ram_mb=256, compute_units=0)
         status = client._query_status(system)
         assert status["devices"][0]["available_ram_mb"] == 768
     finally:

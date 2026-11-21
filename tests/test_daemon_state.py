@@ -9,9 +9,9 @@ import pytest
 
 from reserved import protocol
 from reserved.core import (
+    DeviceAllocation,
     ReservationRequest,
     ReserveRequest,
-    SlotRequest,
     load_ledger,
 )
 from reserved.daemon_state import (
@@ -32,16 +32,14 @@ from reserved.daemon_state import (
 CONFIG = {
     "devices": [
         {
-            "name": "cuda:0",
+            "name": "cuda:GPU-00000000-0000-0000-0000-000000000000",
             "type": "cuda",
-            "model": "rtx3090",
             "ram_mb": 24576,
             "compute_units": 100,
         },
         {
-            "name": "cuda:1",
+            "name": "cuda:GPU-00000000-0000-0000-0000-000000000001",
             "type": "cuda",
-            "model": "rtx3090",
             "ram_mb": 24576,
             "compute_units": 100,
         },
@@ -61,7 +59,7 @@ def accept(state, connection_id="conn-1"):
 
 def reserve_wire(
     label: str,
-    device_name: str = "cuda:0",
+    device_name: str = "cuda:GPU-00000000-0000-0000-0000-000000000000",
     ram_mb: int = 8192,
     compute_units: int = 0,
 ) -> bytes:
@@ -70,8 +68,8 @@ def reserve_wire(
             reservations=(
                 ReservationRequest(
                     label=label,
-                    slots=(
-                        SlotRequest(
+                    allocations=(
+                        DeviceAllocation(
                             name=device_name,
                             ram_mb=ram_mb,
                             compute_units=compute_units,
@@ -89,11 +87,11 @@ def multi_reserve_wire() -> bytes:
             reservations=(
                 ReservationRequest(
                     label="train-a",
-                    slots=(SlotRequest(name="cuda:0", ram_mb=4096),),
+                    allocations=(DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000000", ram_mb=4096),),
                 ),
                 ReservationRequest(
                     label="train-b",
-                    slots=(SlotRequest(name="cuda:0", ram_mb=2048),),
+                    allocations=(DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000000", ram_mb=2048),),
                 ),
             )
         )
@@ -193,13 +191,13 @@ def test_status_request_is_read_only_and_closes_transport():
     assert next_state.leases == {}
     assert "conn-1" not in next_state.transports
     assert response["reservations"] == []
-    assert {device["name"] for device in response["devices"]} == {"cuda:0", "cuda:1"}
+    assert {device["name"] for device in response["devices"]} == {"cuda:GPU-00000000-0000-0000-0000-000000000000", "cuda:GPU-00000000-0000-0000-0000-000000000001"}
     assert CloseTransport("conn-1") in effects
 
 
 def test_successful_reserve_commits_ledger_and_creates_matching_lease_effects():
     state = accept(make_state())
-    before_ram = available_ram(state.ledger, "cuda:0")
+    before_ram = available_ram(state.ledger, "cuda:GPU-00000000-0000-0000-0000-000000000000")
 
     next_state, effects = step(
         state,
@@ -211,7 +209,7 @@ def test_successful_reserve_commits_ledger_and_creates_matching_lease_effects():
     create_effects = effects_of_type(effects, CreateLease)
     lease_ids = tuple(next_state.leases)
 
-    assert available_ram(next_state.ledger, "cuda:0") == before_ram - 8192
+    assert available_ram(next_state.ledger, "cuda:GPU-00000000-0000-0000-0000-000000000000") == before_ram - 8192
     assert len(next_state.ledger.reservations) == 1
     assert lease_ids == (next_state.ledger.reservations[0].reservation_id,)
     assert [effect.lease_id for effect in create_effects] == list(lease_ids)
@@ -244,7 +242,7 @@ def test_failed_reserve_leaves_ledger_and_leases_unchanged():
 
 def test_malformed_reserve_closes_transport_without_corrupting_state():
     state = accept(make_state())
-    malformed = b'{"op":"reserve","reservations":[{"slots":[{"name":"cuda:0"}]}]}\n'
+    malformed = b'{"op":"reserve","reservations":[{"allocations":[{"name":"cuda:GPU-00000000-0000-0000-0000-000000000000"}]}]}\n'
 
     next_state, effects = step(state, TransportReceived("conn-1", malformed))
 
@@ -280,9 +278,9 @@ def test_lease_close_releases_only_the_matching_reservation():
     assert first_lease not in next_state.leases
     assert second_lease in next_state.leases
     assert {r.reservation_id for r in next_state.ledger.reservations} == {second_lease}
-    assert available_ram(next_state.ledger, "cuda:0") == (
-        available_ram(reserved_state.ledger, "cuda:0")
-        + first_reservation.slots[0].ram_mb
+    assert available_ram(next_state.ledger, "cuda:GPU-00000000-0000-0000-0000-000000000000") == (
+        available_ram(reserved_state.ledger, "cuda:GPU-00000000-0000-0000-0000-000000000000")
+        + first_reservation.allocations[0].ram_mb
     )
 
     restored_state, effects = step(next_state, LeaseClosed(second_lease))

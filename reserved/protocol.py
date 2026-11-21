@@ -1,9 +1,9 @@
 """
 protocol.py — Wire serialization for the reserved daemon protocol.
 
-Handles only explicit requests and responses. Constraint types (DeviceConstraint,
-ExplicitSlot from the SDK) never appear here. Device names and CUDA ordinals
-on the wire identify physical devices.
+Handles only explicit requests and responses. The SDK's DeviceConstraint never
+appears here: by the time a request reaches the wire every device is a
+DeviceAllocation. Device names on the wire identify physical devices.
 
 Wire format: single-line JSON terminated by '\\n' over a Unix domain socket.
 """
@@ -14,15 +14,11 @@ import json
 from typing import Any
 
 from .core import (
-    ActiveReservation,
-    DeviceStatus,
+    DeviceAllocation,
     GrantFailure,
     GrantSuccess,
-    GrantedReservation,
     ReservationRequest,
-    ReservationStatus,
     ReserveRequest,
-    SlotRequest,
     StatusResult,
 )
 
@@ -58,21 +54,30 @@ def parse_request(line: bytes | str) -> dict:
     return obj
 
 
+def _allocation_from_wire(obj: dict) -> DeviceAllocation:
+    return DeviceAllocation(
+        name=obj["name"],
+        ram_mb=int(obj.get("ram_mb", 0)),
+        compute_units=int(obj.get("compute_units", 0)),
+    )
+
+
+def _allocation_to_wire(allocation: DeviceAllocation) -> dict:
+    return {
+        "name": allocation.name,
+        "ram_mb": allocation.ram_mb,
+        "compute_units": allocation.compute_units,
+    }
+
+
 def wire_to_reserve_request(obj: dict) -> ReserveRequest:
     """Convert a parsed wire dict to a ReserveRequest."""
     raw_reservations = obj.get("reservations", [])
     reservations = []
     for r in raw_reservations:
-        slots = []
-        for s in r.get("slots", []):
-            slots.append(SlotRequest(
-                name=s["name"],
-                ram_mb=int(s.get("ram_mb", 0)),
-                compute_units=int(s.get("compute_units", 0)),
-            ))
         reservations.append(ReservationRequest(
             label=r["label"],
-            slots=tuple(slots),
+            allocations=tuple(_allocation_from_wire(a) for a in r.get("allocations", [])),
         ))
     return ReserveRequest(reservations=tuple(reservations))
 
@@ -88,14 +93,7 @@ def reserve_request_to_wire(request: ReserveRequest) -> bytes:
         "reservations": [
             {
                 "label": r.label,
-                "slots": [
-                    {
-                        "name": s.name,
-                        "ram_mb": s.ram_mb,
-                        "compute_units": s.compute_units,
-                    }
-                    for s in r.slots
-                ],
+                "allocations": [_allocation_to_wire(a) for a in r.allocations],
             }
             for r in request.reservations
         ],
@@ -120,13 +118,7 @@ def grant_success_to_wire(result: GrantSuccess) -> bytes:
             {
                 "reservation_id": gr.reservation_id,
                 "label": gr.label,
-                "slots": [
-                    {
-                        "device_name": gs.device_name,
-                        "cuda_ordinal": gs.cuda_ordinal,
-                    }
-                    for gs in gr.slots
-                ],
+                "allocations": [_allocation_to_wire(a) for a in gr.allocations],
             }
             for gr in result.reservations
         ],
@@ -146,7 +138,6 @@ def status_result_to_wire(result: StatusResult) -> bytes:
             {
                 "name": d.name,
                 "type": d.type,
-                "model": d.model,
                 "ram_mb": d.ram_mb,
                 "available_ram_mb": d.available_ram_mb,
                 "compute_units": d.compute_units,
@@ -159,14 +150,7 @@ def status_result_to_wire(result: StatusResult) -> bytes:
                 "id": r.id,
                 "label": r.label,
                 "created_at": r.created_at,
-                "slots": [
-                    {
-                        "device_name": s.device_name,
-                        "ram_mb": s.ram_mb,
-                        "compute_units": s.compute_units,
-                    }
-                    for s in r.slots
-                ],
+                "allocations": [_allocation_to_wire(a) for a in r.allocations],
             }
             for r in result.reservations
         ],

@@ -8,9 +8,10 @@ and returns a new Ledger plus a result object.
 
 from __future__ import annotations
 
+import re
 import secrets
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 
 
 # ---------------------------------------------------------------------------
@@ -21,7 +22,6 @@ from dataclasses import dataclass, field, replace
 class Device:
     name: str  # Physical device name.
     type: str
-    model: str | None
     ram_mb: int
     compute_units: int
 
@@ -34,9 +34,13 @@ class DeviceAvailability:
 
 
 @dataclass(frozen=True)
-class SlotRequest:
-    """An explicit slot in a reserve request — names a specific device."""
-    name: str          # physical device name, e.g. "cuda:0"
+class DeviceAllocation:
+    """An explicit device allocation: this device, these resources.
+
+    Clients send it in a reserve request, and a successful grant returns the
+    same record for each allocation it holds.
+    """
+    name: str          # physical device name, e.g. "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782" or "cpu"
     ram_mb: int = 0
     compute_units: int = 0
 
@@ -45,7 +49,7 @@ class SlotRequest:
 class ReservationRequest:
     """One reservation in a reserve request."""
     label: str
-    slots: tuple[SlotRequest, ...]
+    allocations: tuple[DeviceAllocation, ...]
 
 
 @dataclass(frozen=True)
@@ -55,33 +59,19 @@ class ReserveRequest:
 
 
 @dataclass(frozen=True)
-class GrantedSlot:
-    """One granted slot in a successful reservation."""
-    device_name: str  # Physical device name.
-    cuda_ordinal: int  # Physical CUDA ordinal, or -1 for non-CUDA devices.
-
-
-@dataclass(frozen=True)
 class GrantedReservation:
     reservation_id: str
     label: str
-    slots: tuple[GrantedSlot, ...]
+    allocations: tuple[DeviceAllocation, ...]
     created_at: float
 
 
 @dataclass(frozen=True)
 class ActiveReservation:
-    """Tracks a live reservation in the ledger — includes the claimed resources."""
-
-    @dataclass(frozen=True)
-    class ClaimedSlot:
-        device_name: str  # Physical device name.
-        ram_mb: int
-        compute_units: int
-
+    """Tracks a live reservation in the ledger: the allocations it holds."""
     reservation_id: str
     label: str
-    slots: tuple[ActiveReservation.ClaimedSlot, ...]
+    allocations: tuple[DeviceAllocation, ...]
     created_at: float
 
 
@@ -114,7 +104,6 @@ GrantResult = GrantSuccess | GrantFailure
 class DeviceStatus:
     name: str  # Physical device name.
     type: str
-    model: str | None
     ram_mb: int
     available_ram_mb: int
     compute_units: int
@@ -126,7 +115,7 @@ class ReservationStatus:
     id: str
     label: str
     created_at: float
-    slots: tuple[ActiveReservation.ClaimedSlot, ...]
+    allocations: tuple[DeviceAllocation, ...]
 
 
 @dataclass(frozen=True)
@@ -139,24 +128,33 @@ class StatusResult:
 # Functions
 # ---------------------------------------------------------------------------
 
+_CUDA_UUID = re.compile(
+    r"GPU-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
+
+
+def cuda_uuid(name: str) -> str:
+    """Return the GPU UUID encoded in a ``cuda:GPU-<uuid>`` device name.
+
+    The UUID is the device's only identity. It is what ``nvidia-smi -L``
+    prints, what ``CUDA_VISIBLE_DEVICES`` accepts, and what torch reports for
+    each visible device, so no enumeration order is involved anywhere. The hex
+    digits must be lowercase, exactly as the driver prints them. Raises
+    ValueError for any other name, including non-CUDA names.
+    """
+    kind, sep, uuid_text = name.partition(":")
+    if kind != "cuda" or not sep or not _CUDA_UUID.match(uuid_text):
+        raise ValueError(
+            f"invalid CUDA device name {name!r}: must be 'cuda:GPU-<uuid>' "
+            "with the lowercase UUID printed by 'nvidia-smi -L'"
+        )
+    return uuid_text
+
+
 def _validate_device_name(name: str, device_type: str) -> None:
     """Raise ValueError if a device name is invalid for its type."""
     if device_type == "cuda":
-        parts = name.split(":")
-        if len(parts) != 2 or parts[0] != "cuda":
-            raise ValueError(
-                f"invalid CUDA device name {name!r}: must be 'cuda:N'"
-            )
-        try:
-            ordinal = int(parts[1])
-        except ValueError:
-            raise ValueError(
-                f"invalid CUDA device name {name!r}: ordinal must be an integer"
-            )
-        if ordinal < 0:
-            raise ValueError(
-                f"invalid CUDA device name {name!r}: ordinal must be non-negative"
-            )
+        cuda_uuid(name)
 
 
 def load_ledger(config: dict) -> Ledger:
@@ -169,7 +167,6 @@ def load_ledger(config: dict) -> Ledger:
         dev = Device(
             name=name,
             type=device_type,
-            model=d.get("model"),
             ram_mb=d.get("ram_mb", 0),
             compute_units=d.get("compute_units", 0),
         )
@@ -193,13 +190,13 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
     """
     Attempt to grant all reservations in *request* atomically.
 
-    Returns (new_ledger, GrantSuccess) if all slots can be satisfied, or
-    (original_ledger, GrantFailure) if any slot cannot be satisfied.
+    Returns (new_ledger, GrantSuccess) if all allocations can be satisfied, or
+    (original_ledger, GrantFailure) if any allocation cannot be satisfied.
     """
     idx = _availability_index(ledger)
     avail = list(ledger.availability)  # mutable working copy
 
-    # Collect all slots across all reservations for atomic checking.
+    # Collect all allocations across all reservations for atomic checking.
     # We'll simulate the subtraction in avail[] and roll back on failure.
     saved = {}  # name → original DeviceAvailability
 
@@ -208,27 +205,27 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
 
     # Pass 1: check and tentatively subtract.
     for res_req in request.reservations:
-        for slot in res_req.slots:
-            if slot.name not in idx:
-                return _fail(f"unknown device: {slot.name!r}")
-            i = idx[slot.name]
+        for allocation in res_req.allocations:
+            if allocation.name not in idx:
+                return _fail(f"unknown device: {allocation.name!r}")
+            i = idx[allocation.name]
             da = avail[i]
-            if slot.name not in saved:
-                saved[slot.name] = ledger.availability[i]
-            if da.available_ram_mb < slot.ram_mb:
+            if allocation.name not in saved:
+                saved[allocation.name] = ledger.availability[i]
+            if da.available_ram_mb < allocation.ram_mb:
                 return _fail(
-                    f"insufficient RAM on {slot.name!r}: "
-                    f"need {slot.ram_mb} MB, have {da.available_ram_mb} MB"
+                    f"insufficient RAM on {allocation.name!r}: "
+                    f"need {allocation.ram_mb} MB, have {da.available_ram_mb} MB"
                 )
-            if da.available_compute_units < slot.compute_units:
+            if da.available_compute_units < allocation.compute_units:
                 return _fail(
-                    f"insufficient compute_units on {slot.name!r}: "
-                    f"need {slot.compute_units}, have {da.available_compute_units}"
+                    f"insufficient compute_units on {allocation.name!r}: "
+                    f"need {allocation.compute_units}, have {da.available_compute_units}"
                 )
             avail[i] = DeviceAvailability(
                 device=da.device,
-                available_ram_mb=da.available_ram_mb - slot.ram_mb,
-                available_compute_units=da.available_compute_units - slot.compute_units,
+                available_ram_mb=da.available_ram_mb - allocation.ram_mb,
+                available_compute_units=da.available_compute_units - allocation.compute_units,
             )
 
     # Pass 2: build granted reservations.
@@ -239,37 +236,17 @@ def grant(ledger: Ledger, request: ReserveRequest) -> tuple[Ledger, GrantResult]
     for res_req in request.reservations:
         reservation_id = secrets.token_hex(3)  # 6 hex chars
 
-        granted_slots: list[GrantedSlot] = []
-        claimed_slots: list[ActiveReservation.ClaimedSlot] = []
-
-        for slot in res_req.slots:
-            i = idx[slot.name]
-            dev = avail[i].device
-            if dev.type == "cuda":
-                # Name is guaranteed valid by load_ledger validation.
-                cuda_ordinal = int(slot.name.split(":")[1])
-            else:
-                cuda_ordinal = -1
-            granted_slots.append(GrantedSlot(
-                device_name=slot.name,
-                cuda_ordinal=cuda_ordinal,
-            ))
-            claimed_slots.append(ActiveReservation.ClaimedSlot(
-                device_name=slot.name,
-                ram_mb=slot.ram_mb,
-                compute_units=slot.compute_units,
-            ))
-
+        # The grant and the ledger both hold the allocations exactly as requested.
         granted_reservations.append(GrantedReservation(
             reservation_id=reservation_id,
             label=res_req.label,
-            slots=tuple(granted_slots),
+            allocations=res_req.allocations,
             created_at=now,
         ))
         active_reservations.append(ActiveReservation(
             reservation_id=reservation_id,
             label=res_req.label,
-            slots=tuple(claimed_slots),
+            allocations=res_req.allocations,
             created_at=now,
         ))
 
@@ -301,10 +278,10 @@ def release(ledger: Ledger, reservation_id: str) -> Ledger:
     idx = _availability_index(ledger)
     avail = list(ledger.availability)
 
-    for claimed in target.slots:
-        if claimed.device_name not in idx:
+    for claimed in target.allocations:
+        if claimed.name not in idx:
             continue
-        i = idx[claimed.device_name]
+        i = idx[claimed.name]
         da = avail[i]
         avail[i] = DeviceAvailability(
             device=da.device,
@@ -324,7 +301,6 @@ def status(ledger: Ledger) -> StatusResult:
         DeviceStatus(
             name=da.device.name,
             type=da.device.type,
-            model=da.device.model,
             ram_mb=da.device.ram_mb,
             available_ram_mb=da.available_ram_mb,
             compute_units=da.device.compute_units,
@@ -337,7 +313,7 @@ def status(ledger: Ledger) -> StatusResult:
             id=ar.reservation_id,
             label=ar.label,
             created_at=ar.created_at,
-            slots=ar.slots,
+            allocations=ar.allocations,
         )
         for ar in ledger.reservations
     )

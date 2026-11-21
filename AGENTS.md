@@ -13,9 +13,11 @@ consumers a simple lifetime model.
 
 ## 1. Before editing
 
-- [ ] Read the relevant implementation and tests, plus `README.md` and
-  `ARCHITECTURE.md`. Treat `RESERVED_DESIGN.md` and `DAEMON_REFACTOR_PLAN.md`
-  as historical context, not proof of current behavior.
+- [ ] Read the relevant implementation and tests, plus `README.md`,
+  `ARCHITECTURE.md`, and `RESERVED_DESIGN.md`. All three describe the current
+  system: the README is the user guide, `ARCHITECTURE.md` the implementation
+  reference, and `RESERVED_DESIGN.md` the design and its rationale. When a
+  change alters behavior they describe, update them in the same change.
 - [ ] State the requested behavior, the observable result, and the guarantees
   that must remain true.
 - [ ] Identify the affected layers using the module map below.
@@ -99,8 +101,9 @@ reducing the effects layer's line count is not a goal by itself.
   and expired leases. Avoid broad catches that hide these differences.
 - [ ] Keep cleanup close to ownership. Make repeated release safe where the
   public interface promises it.
-- [ ] When placement or execution changes, verify physical CUDA ordinals
-  against logical indices inside `CUDA_VISIBLE_DEVICES`.
+- [ ] When placement or execution changes, verify that each granted CUDA
+  UUID resolves to the device torch reports with that UUID, both under the
+  launcher's `CUDA_VISIBLE_DEVICES` and in an unmasked process.
 
 ## 5. Verify before handoff
 

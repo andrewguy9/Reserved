@@ -2,12 +2,12 @@
 client.py — Python SDK client for the reserved daemon.
 
 Public API:
-  Reservation(label, *slots, solver=ConsolidateSolver(), socket_path=None)
+  Reservation(label, *constraints, solver=ConsolidateSolver(), socket_path=None)
   adopt_inherited_lease()
   Request(*reservations, socket_path=None)
-  DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)
-  ExplicitSlot(name, *, ram_mb=0, compute_units=0)
-  GrantedDevice(device_name, cuda_ordinal)
+  DeviceConstraint(type, *, name=None, ram_mb=0, compute_units=0)
+  torch_device(allocation)   # PyTorch device for one granted DeviceAllocation
+  torch_cuda_uuid(properties)  # GPU-<uuid> of a torch CUDA device
 """
 
 from __future__ import annotations
@@ -18,15 +18,12 @@ import os
 import select
 import socket
 import threading
-from dataclasses import dataclass, field
-from typing import Any, Sequence
+import uuid
+from dataclasses import dataclass
+from typing import Any
 
 from reserved import protocol
-from reserved.core import (
-    ReservationRequest,
-    ReserveRequest,
-    SlotRequest,
-)
+from reserved.core import DeviceAllocation, ReserveRequest, cuda_uuid
 from reserved.paths import client_socket_override as _get_socket_override, client_socket_paths
 from reserved.sdk.errors import (
     DaemonNotRunningError,
@@ -37,7 +34,7 @@ from reserved.sdk.errors import (
 from reserved.sdk.solvers import ConsolidateSolver
 
 # Type alias used by solvers.
-ReservationSpec = tuple[str, list]  # (label, list[DeviceConstraint | ExplicitSlot])
+ReservationSpec = tuple[str, list]  # (label, list[DeviceConstraint])
 
 _inherited_lease_lock = threading.Lock()
 _inherited_lease_adopted = False
@@ -53,14 +50,20 @@ os.register_at_fork(after_in_child=_reset_inherited_lease_lock)
 
 
 # ---------------------------------------------------------------------------
-# Slot descriptor types (in-process only, never serialized)
+# Device constraints (in-process only, never serialized)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class DeviceConstraint:
-    """A constraint-based slot — the solver picks the device."""
+    """What a reservation needs from one device; the solver picks the device.
+
+    Every field given narrows the choice. ``type`` must match the device's
+    configured type, ``name`` pins one physical device, and ``ram_mb`` and
+    ``compute_units`` must fit in its available capacity. The solver turns
+    each constraint into a DeviceAllocation naming the chosen device.
+    """
     type: str | None = None
-    model: str | None = None
+    name: str | None = None
     ram_mb: int = 0
     compute_units: int = 0
 
@@ -68,88 +71,83 @@ class DeviceConstraint:
         self,
         type: str | None = None,
         *,
-        model: str | None = None,
+        name: str | None = None,
         ram_mb: int = 0,
         compute_units: int = 0,
     ) -> None:
         self.type = type
-        self.model = model
-        self.ram_mb = ram_mb
-        self.compute_units = compute_units
-
-
-@dataclass
-class ExplicitSlot:
-    """An explicit slot — directly names a physical device."""
-    name: str  # Physical device name, e.g. "cuda:2".
-    ram_mb: int = 0
-    compute_units: int = 0
-
-    def __init__(self, name: str, *, ram_mb: int = 0, compute_units: int = 0) -> None:
         self.name = name
         self.ram_mb = ram_mb
         self.compute_units = compute_units
 
 
 # ---------------------------------------------------------------------------
-# GrantedDevice — returned to callers after acquire()
+# PyTorch device resolution for granted allocations
 # ---------------------------------------------------------------------------
 
-@dataclass
-class GrantedDevice:
-    """A physical device slot granted by the daemon."""
-    device_name: str  # Physical device name.
-    cuda_ordinal: int  # Physical CUDA ordinal, or -1 for non-CUDA devices.
+def torch_device(allocation: DeviceAllocation) -> Any:
+    """Return the process-local PyTorch device for one granted allocation.
 
-    def torch_device(self) -> Any:
-        """Return the process-local PyTorch device for this physical grant.
-
-        CUDA uses the grant's logical index within CUDA_VISIBLE_DEVICES. Set
-        the mask before CUDA initializes. Hidden devices, ambiguous masks, and
-        unsupported device kinds raise ReservationError.
-        """
-        device_type = self.device_name.partition(":")[0]
-        if self.cuda_ordinal >= 0:
-            logical_index = _logical_cuda_index(
-                self.device_name, self.cuda_ordinal, os.environ.get("CUDA_VISIBLE_DEVICES"),
-            )
-            torch_name = f"cuda:{logical_index}"
-        elif device_type == "metal":
-            torch_name = "mps"
-        elif device_type == "cpu":
-            torch_name = "cpu"
-        else:
-            raise ReservationError(f"unsupported PyTorch device {self.device_name!r}")
-
-        import torch  # type: ignore[import]
-        return torch.device(torch_name)
+    PyTorch is expected to be installed in the calling process; this package
+    does not declare or install it, and no other SDK operation imports it. A
+    CUDA grant resolves to the device torch reports with the same GPU UUID,
+    so the result is correct under any CUDA_VISIBLE_DEVICES, set or unset,
+    and the SDK never reads or writes the mask. This initializes CUDA in the
+    calling process, so call it in the process that will use the GPU. A
+    grant torch cannot see, a torch build that does not report device UUIDs,
+    and unsupported device kinds raise ReservationError.
+    """
+    device_type = allocation.name.partition(":")[0]
+    import torch  # type: ignore[import]
+    if device_type == "cuda":
+        torch_name = f"cuda:{_torch_cuda_index(allocation.name, torch)}"
+    elif device_type == "metal":
+        torch_name = "mps"
+    elif device_type == "cpu":
+        torch_name = "cpu"
+    else:
+        raise ReservationError(f"unsupported PyTorch device {allocation.name!r}")
+    return torch.device(torch_name)
 
 
-def _logical_cuda_index(physical_name: str, physical_ordinal: int, mask: str | None) -> int:
-    if mask is None:
-        return physical_ordinal
+def torch_cuda_uuid(properties: Any) -> str:
+    """Return the ``GPU-<uuid>`` identity of a torch CUDA device from its properties.
 
-    visible_ordinals: list[int] = []
-    if mask not in ("", "-1"):
-        tokens = mask.split(",")
-        try:
-            if not all(token.isascii() and token.isdecimal() for token in tokens):
-                raise ValueError
-            visible_ordinals = [int(token) for token in tokens]
-            if max(visible_ordinals) > 2**31 - 1 or len(set(visible_ordinals)) != len(tokens):
-                raise ValueError
-        except ValueError as exc:
-            raise ReservationError(
-                f"cannot map physical device {physical_name!r}: invalid "
-                f"CUDA_VISIBLE_DEVICES={mask!r}; expected distinct numeric CUDA ordinals"
-            ) from exc
+    *properties* is what ``torch.cuda.get_device_properties(i)`` returns. The
+    UUID is the one ``nvidia-smi -L`` prints and a ``cuda:`` device name
+    carries. Raises ReservationError if this torch build does not report it.
+    """
+    raw = getattr(properties, "uuid", None)
+    if raw is None:
+        raise ReservationError("this torch build does not report CUDA device UUIDs")
+    return "GPU-" + str(uuid.UUID(bytes=bytes(raw.bytes)))
 
+
+def _torch_cuda_index(physical_name: str, torch_module: Any) -> int:
+    """Return the index torch assigns to the CUDA device named by *physical_name*.
+
+    torch enumerates the devices visible to this process; each reports its GPU
+    UUID as 16 raw bytes. The grant's UUID is matched against them, so the
+    index is right whatever CUDA_VISIBLE_DEVICES the process was started with.
+    """
     try:
-        return visible_ordinals.index(physical_ordinal)
+        wanted = cuda_uuid(physical_name)
     except ValueError as exc:
-        raise ReservationError(
-            f"physical device {physical_name!r} is not visible in CUDA_VISIBLE_DEVICES={mask!r}"
-        ) from exc
+        raise ReservationError(str(exc)) from exc
+
+    visible: list[str] = []
+    for index in range(torch_module.cuda.device_count()):
+        try:
+            reported = torch_cuda_uuid(torch_module.cuda.get_device_properties(index))
+        except ReservationError as exc:
+            raise ReservationError(f"cannot map physical device {physical_name!r}: {exc}") from exc
+        if reported == wanted:
+            return index
+        visible.append(reported)
+    raise ReservationError(
+        f"physical device {physical_name!r} is not visible to torch; visible CUDA "
+        f"devices: {visible} (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -260,12 +258,16 @@ def _send_reserve(
 
 class Reservation:
     """
-    A named reservation of one or more device slots.
+    A named reservation of one or more device allocations.
+
+    Each positional argument is a DeviceConstraint; the solver resolves every
+    constraint to a device against the daemon's current status. Pin a device
+    with ``DeviceConstraint(name=...)``.
 
     Typically used as a context manager:
 
         with Reservation("train", DeviceConstraint("cuda", ram_mb=16384)) as r:
-            model.to(r.devices[0].torch_device())
+            model.to(r.torch_devices()[0])
             run_training()
 
     Can also be acquired manually:
@@ -279,18 +281,24 @@ class Reservation:
     def __init__(
         self,
         label: str,
-        *slots: DeviceConstraint | ExplicitSlot,
+        *constraints: DeviceConstraint,
         solver: ConsolidateSolver | None = None,
         socket_path: str | None = None,
     ) -> None:
+        for constraint in constraints:
+            if not isinstance(constraint, DeviceConstraint):
+                raise TypeError(
+                    f"Reservation takes DeviceConstraint arguments, got {constraint!r}; "
+                    "pin a device with DeviceConstraint(name=...)"
+                )
         self.label = label
-        self._slots = list(slots)
+        self._constraints = list(constraints)
         self._solver = solver if solver is not None else ConsolidateSolver()
         self._socket_path = socket_path
 
-        # Physical grant metadata set after acquisition or adoption.
+        # Granted allocations, set after acquisition or adoption.
         self.reservation_id: str | None = None
-        self.devices: list[GrantedDevice] = []
+        self.devices: list[DeviceAllocation] = []
         self._lease_sock: socket.socket | None = None
         self._inherited = False
 
@@ -315,27 +323,13 @@ class Reservation:
 
     def _acquire_single(self) -> None:
         """Acquire this reservation by itself (not part of a multi-reservation Request)."""
-        from ..core import ReservationRequest, ReserveRequest, SlotRequest
         socket_path = _get_socket_override(self._socket_path)
 
-        if self._all_explicit():
-            # Skip solver step.
-            slots = [
-                SlotRequest(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
-                for s in self._slots
-            ]
-            req = ReserveRequest(reservations=(
-                ReservationRequest(label=self.label, slots=tuple(slots)),
-            ))
-        else:
-            status = _query_status(socket_path)
-            try:
-                req = self._solver.solve(
-                    [(self.label, self._slots)],
-                    status["devices"],
-                )
-            except ValueError as exc:
-                raise ReservationError(str(exc)) from exc
+        status = _query_status(socket_path)
+        try:
+            req = self._solver.solve([(self.label, self._constraints)], status["devices"])
+        except ValueError as exc:
+            raise ReservationError(str(exc)) from exc
 
         resp, fds = _send_reserve(socket_path, req, num_reservations=1)
         if not resp.get("ok"):
@@ -349,17 +343,11 @@ class Reservation:
 
         granted = resp["reservations"][0]
         self.reservation_id = granted["reservation_id"]
-        self.devices = [
-            GrantedDevice(device_name=s["device_name"], cuda_ordinal=s["cuda_ordinal"])
-            for s in granted["slots"]
-        ]
+        self.devices = [_granted_allocation(a) for a in granted["allocations"]]
         if fds:
             self._lease_sock = socket.socket(fileno=fds[0])
         else:
             self._lease_sock = None
-
-    def _all_explicit(self) -> bool:
-        return all(isinstance(s, ExplicitSlot) for s in self._slots)
 
     # ------------------------------------------------------------------
     # Public methods
@@ -399,8 +387,8 @@ class Reservation:
                 )
 
     def torch_devices(self) -> list[Any]:
-        """Return process-local PyTorch devices in physical grant order."""
-        return [d.torch_device() for d in self.devices]
+        """Return process-local PyTorch devices, one per granted allocation, in grant order."""
+        return [torch_device(a) for a in self.devices]
 
     def __repr__(self) -> str:
         return (
@@ -440,33 +428,35 @@ def _wrap_inherited_lease(fd_text: str) -> socket.socket:
             lease_sock.detach()
 
 
-def _parse_inherited_grants(grants_json: str | None) -> list[GrantedDevice]:
+def _granted_allocation(record: Any) -> DeviceAllocation:
+    """Parse one granted allocation record ({name, ram_mb, compute_units}).
+
+    Raises ValueError for a missing or mistyped field, or a CUDA name the
+    driver could not address.
+    """
+    if not isinstance(record, dict):
+        raise ValueError("allocation record is not an object")
+    name = record.get("name")
+    ram_mb = record.get("ram_mb")
+    compute_units = record.get("compute_units")
+    if not isinstance(name, str) or type(ram_mb) is not int or type(compute_units) is not int:
+        raise ValueError(f"malformed allocation record {record!r}")
+    if name.partition(":")[0] == "cuda":
+        cuda_uuid(name)
+    return DeviceAllocation(name=name, ram_mb=ram_mb, compute_units=compute_units)
+
+
+def _parse_inherited_grants(grants_json: str | None) -> list[DeviceAllocation]:
     if grants_json is None:
-        raise ReservationError("RESERVED_GRANTED_SLOTS is missing; launch the worker with the updated reserve CLI")
+        raise ReservationError("RESERVED_GRANTED_ALLOCATIONS is missing; launch the worker with the updated reserve CLI")
 
     try:
-        slots = json.loads(grants_json)
-        if not isinstance(slots, list):
-            raise ValueError
-
-        devices: list[GrantedDevice] = []
-        for slot in slots:
-            if not isinstance(slot, dict):
-                raise ValueError
-            physical_name = slot.get("device_name")
-            physical_ordinal = slot.get("cuda_ordinal")
-            if not isinstance(physical_name, str) or type(physical_ordinal) is not int:
-                raise ValueError
-            if physical_ordinal < -1:
-                raise ValueError
-            if physical_ordinal >= 0:
-                kind, _, ordinal_text = physical_name.partition(":")
-                if kind != "cuda" or int(ordinal_text) != physical_ordinal:
-                    raise ValueError
-            devices.append(GrantedDevice(physical_name, physical_ordinal))
-        return devices
+        grants = json.loads(grants_json)
+        if not isinstance(grants, list):
+            raise ValueError("grant metadata is not a list")
+        return [_granted_allocation(grant) for grant in grants]
     except (RecursionError, ValueError) as exc:
-        raise ReservationError("RESERVED_GRANTED_SLOTS contains invalid physical grant metadata") from exc
+        raise ReservationError("RESERVED_GRANTED_ALLOCATIONS contains invalid grant metadata") from exc
 
 
 def adopt_inherited_lease() -> Reservation:
@@ -475,7 +465,7 @@ def adopt_inherited_lease() -> Reservation:
     Use the returned reservation as a context manager or release it explicitly.
     This claims the existing lease once, clears ``RESERVED_FD``, and marks the
     descriptor close-on-exec. The reservation carries the physical grants
-    from ``RESERVED_GRANTED_SLOTS`` and the launcher ID when available.
+    from ``RESERVED_GRANTED_ALLOCATIONS`` and the launcher ID when available.
 
     Raises ReservationError for a missing or invalid descriptor or grant
     metadata, and InheritedLeaseAlreadyAdoptedError if the handoff was already
@@ -492,7 +482,7 @@ def adopt_inherited_lease() -> Reservation:
 
         reservation = Reservation("inherited")
         reservation.reservation_id = os.environ.get("RESERVED_ID")
-        reservation.devices = _parse_inherited_grants(os.environ.get("RESERVED_GRANTED_SLOTS"))
+        reservation.devices = _parse_inherited_grants(os.environ.get("RESERVED_GRANTED_ALLOCATIONS"))
         reservation._inherited = True
         reservation._lease_sock = _wrap_inherited_lease(fd_text)
         _inherited_lease_adopted = True
@@ -542,17 +532,8 @@ class Request:
 
         socket_path = _get_socket_override(self._socket_path)
 
-        # Determine if all slots are explicit (across all reservations).
-        all_explicit = all(
-            all(isinstance(s, ExplicitSlot) for s in r._slots)
-            for r in self._reservations
-        )
-
-        if all_explicit:
-            req = self._build_explicit_request()
-        else:
-            status = _query_status(socket_path)
-            req = self._solve(status["devices"])
+        status = _query_status(socket_path)
+        req = self._solve(status["devices"])
 
         num = len(self._reservations)
         resp, fds = _send_reserve(socket_path, req, num_reservations=num)
@@ -569,10 +550,7 @@ class Request:
         result: list[Reservation] = []
         for res, granted, fd in zip(self._reservations, granted_list, fds):
             res.reservation_id = granted["reservation_id"]
-            res.devices = [
-                GrantedDevice(device_name=s["device_name"], cuda_ordinal=s["cuda_ordinal"])
-                for s in granted["slots"]
-            ]
+            res.devices = [_granted_allocation(a) for a in granted["allocations"]]
             res._lease_sock = socket.socket(fileno=fd)
             result.append(res)
 
@@ -582,21 +560,10 @@ class Request:
 
         return tuple(result)
 
-    def _build_explicit_request(self) -> ReserveRequest:
-        from ..core import ReservationRequest, ReserveRequest, SlotRequest
-        res_reqs = []
-        for r in self._reservations:
-            slots = [
-                SlotRequest(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
-                for s in r._slots
-            ]
-            res_reqs.append(ReservationRequest(label=r.label, slots=tuple(slots)))
-        return ReserveRequest(reservations=tuple(res_reqs))
-
     def _solve(self, devices: list[dict]) -> ReserveRequest:
         # All reservations share the same solver (from the first one, or default).
         solver = self._reservations[0]._solver if self._reservations else ConsolidateSolver()
-        specs = [(r.label, r._slots) for r in self._reservations]
+        specs = [(r.label, r._constraints) for r in self._reservations]
         try:
             return solver.solve(specs, devices)
         except ValueError as exc:

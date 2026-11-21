@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import types
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -16,13 +15,19 @@ import pytest
 
 from reserved import sdk
 from reserved.sdk import client
+from tests.cuda_support import cuda_name, fake_torch
+
+CUDA2 = cuda_name(2)
+CUDA5 = cuda_name(5)
+UUID2 = CUDA2.partition(":")[2]
+UUID5 = CUDA5.partition(":")[2]
 
 
 @pytest.fixture
 def handoff(monkeypatch):
     monkeypatch.setattr(client, "_inherited_lease_adopted", False)
     monkeypatch.delenv("RESERVED_FD", raising=False)
-    monkeypatch.setenv("RESERVED_GRANTED_SLOTS", "[]")
+    monkeypatch.setenv("RESERVED_GRANTED_ALLOCATIONS", "[]")
     monkeypatch.setenv("RESERVED_ID", "inherited-id")
 
     def publish(fd):
@@ -76,7 +81,7 @@ def test_adopted_lease_reports_daemon_disconnect(handoff, disconnect_before_adop
             os.close(fd)
             raise
         with reservation:
-            assert reservation.devices == []  # The handoff explicitly grants zero slots.
+            assert reservation.devices == []  # The handoff explicitly grants zero allocations.
             if not disconnect_before_adoption:
                 reservation.check()
                 daemon.close()
@@ -90,9 +95,9 @@ def test_missing_grant_metadata_leaves_inherited_descriptor_unclaimed(handoff, m
         fd = worker.fileno()
         worker.set_inheritable(True)
         handoff(fd)
-        monkeypatch.delenv("RESERVED_GRANTED_SLOTS")
+        monkeypatch.delenv("RESERVED_GRANTED_ALLOCATIONS")
 
-        with pytest.raises(sdk.ReservationError, match="RESERVED_GRANTED_SLOTS is missing"):
+        with pytest.raises(sdk.ReservationError, match="RESERVED_GRANTED_ALLOCATIONS is missing"):
             adopted = sdk.adopt_inherited_lease()
             worker.detach()
             adopted.release()
@@ -108,11 +113,16 @@ def test_invalid_grant_metadata_leaves_inherited_descriptor_unclaimed(handoff, m
         handoff(fd)
         for malformed in (
             "", "null", "[{}]",
-            '[{"device_name":"cuda:2","cuda_ordinal":true}]',
-            '[{"device_name":"cuda:2","cuda_ordinal":5}]',
+            '[{"device_name":"cuda:2"}]',
+            '[{"name":2,"ram_mb":0,"compute_units":0}]',
+            '[{"name":"cpu"}]',
+            '[{"name":"cpu","ram_mb":"1024","compute_units":0}]',
+            '[{"name":"cpu","ram_mb":1024,"compute_units":true}]',
+            '[{"name":"cuda:2","ram_mb":0,"compute_units":0}]',
+            '[{"name":"cuda:gpu","ram_mb":0,"compute_units":0}]',
         ):
-            monkeypatch.setenv("RESERVED_GRANTED_SLOTS", malformed)
-            with pytest.raises(sdk.ReservationError, match="RESERVED_GRANTED_SLOTS"):
+            monkeypatch.setenv("RESERVED_GRANTED_ALLOCATIONS", malformed)
+            with pytest.raises(sdk.ReservationError, match="RESERVED_GRANTED_ALLOCATIONS"):
                 sdk.adopt_inherited_lease()
             assert os.environ["RESERVED_FD"] == str(fd)
             os.fstat(fd)
@@ -156,8 +166,8 @@ def daemon_env():
         config = Path(directory) / "devices.json"
         config.write_text(json.dumps({"devices": [
             {"name": "cpu", "type": "cpu", "ram_mb": 1024},
-            {"name": "cuda:2", "type": "cuda", "ram_mb": 1024},
-            {"name": "cuda:5", "type": "cuda", "ram_mb": 1024},
+            {"name": CUDA2, "type": "cuda", "ram_mb": 1024},
+            {"name": CUDA5, "type": "cuda", "ram_mb": 1024},
         ]}))
         env = {**os.environ, "RESERVED_SOCKET": socket_path}
         env.pop("LISTEN_FDS", None)
@@ -208,22 +218,22 @@ def test_launcher_passes_worker_options_and_separator_through(daemon_env):
 
 
 def test_sdk_keeps_physical_grant_order_with_reordered_cuda_visibility(daemon_env, monkeypatch):
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "5,2")
-    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=str))
+    # torch sees physical 5 first, then 2: the SDK resolves by UUID, not by position.
+    monkeypatch.setitem(sys.modules, "torch", fake_torch(CUDA5, CUDA2))
     with sdk.Reservation(
-        "direct", sdk.ExplicitSlot("cuda:2"), sdk.ExplicitSlot("cuda:5"),
-        sdk.ExplicitSlot("cuda:2"), socket_path=daemon_env["RESERVED_SOCKET"],
+        "direct", sdk.DeviceConstraint(name=CUDA2), sdk.DeviceConstraint(name=CUDA5),
+        sdk.DeviceConstraint(name=CUDA2), socket_path=daemon_env["RESERVED_SOCKET"],
     ) as lease:
         assert lease.devices == [
-            sdk.GrantedDevice("cuda:2", 2), sdk.GrantedDevice("cuda:5", 5),
-            sdk.GrantedDevice("cuda:2", 2),
+            sdk.DeviceAllocation(CUDA2, 0, 0), sdk.DeviceAllocation(CUDA5, 0, 0),
+            sdk.DeviceAllocation(CUDA2, 0, 0),
         ]
         assert lease.torch_devices() == ["cuda:1", "cuda:0", "cuda:1"]
 
 
 def test_launcher_hands_physical_cuda_2_to_worker_as_logical_cuda_0(daemon_env):
     result = subprocess.run(
-        [sys.executable, "-m", "reserved.bin.reserve", "worker", "name=cuda:2",
+        [sys.executable, "-m", "reserved.bin.reserve", "worker", f"name={CUDA2}",
          "--", sys.executable, "-m", "tests.test_inherited_lease", "single-cuda"],
         env=daemon_env, capture_output=True, text=True, timeout=10,
     )
@@ -231,20 +241,21 @@ def test_launcher_hands_physical_cuda_2_to_worker_as_logical_cuda_0(daemon_env):
 
 
 def _run_single_cuda_worker():
-    sys.modules["torch"] = types.SimpleNamespace(device=str)
+    # Under the launcher's mask torch sees only the granted card.
+    sys.modules["torch"] = fake_torch(CUDA2)
 
-    assert os.environ["RESERVED_DEVICE"] == "cuda:2"
-    assert os.environ["RESERVED_DEVICES"] == "cuda:2"
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "2"
+    assert os.environ["RESERVED_DEVICE"] == CUDA2
+    assert os.environ["RESERVED_DEVICES"] == CUDA2
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == UUID2
     with sdk.adopt_inherited_lease() as lease:
-        assert lease.devices == [sdk.GrantedDevice(device_name="cuda:2", cuda_ordinal=2)]
+        assert lease.devices == [sdk.DeviceAllocation(CUDA2, 0, 0)]
         assert lease.torch_devices() == ["cuda:0"]
 
 
-def test_launcher_keeps_repeated_slots_in_physical_grant_order(daemon_env):
+def test_launcher_keeps_repeated_allocations_in_physical_grant_order(daemon_env):
     result = subprocess.run(
-        [sys.executable, "-m", "reserved.bin.reserve", "worker", "name=cuda:5",
-         "name=cuda:2", "name=cuda:5", "--", sys.executable, "-m",
+        [sys.executable, "-m", "reserved.bin.reserve", "worker", f"name={CUDA5}",
+         f"name={CUDA2}", f"name={CUDA5}", "--", sys.executable, "-m",
          "tests.test_inherited_lease", "repeated-cuda"],
         env=daemon_env, capture_output=True, text=True, timeout=10,
     )
@@ -252,14 +263,15 @@ def test_launcher_keeps_repeated_slots_in_physical_grant_order(daemon_env):
 
 
 def _run_repeated_cuda_worker():
-    sys.modules["torch"] = types.SimpleNamespace(device=str)
-    assert os.environ["RESERVED_DEVICE"] == "cuda:5"
-    assert os.environ["RESERVED_DEVICES"] == "cuda:5,cuda:2,cuda:5"
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "5,2"
+    # The mask lists each granted card once, in first-grant order.
+    sys.modules["torch"] = fake_torch(CUDA5, CUDA2)
+    assert os.environ["RESERVED_DEVICE"] == CUDA5
+    assert os.environ["RESERVED_DEVICES"] == f"{CUDA5},{CUDA2},{CUDA5}"
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == f"{UUID5},{UUID2}"
     with sdk.adopt_inherited_lease() as lease:
         assert lease.devices == [
-            sdk.GrantedDevice("cuda:5", 5), sdk.GrantedDevice("cuda:2", 2),
-            sdk.GrantedDevice("cuda:5", 5),
+            sdk.DeviceAllocation(CUDA5, 0, 0), sdk.DeviceAllocation(CUDA2, 0, 0),
+            sdk.DeviceAllocation(CUDA5, 0, 0),
         ]
         assert lease.torch_devices() == ["cuda:0", "cuda:1", "cuda:0"]
 
@@ -276,7 +288,7 @@ def _run_launched_worker(mode):
     reservation = sdk.adopt_inherited_lease()
     assert isinstance(reservation, sdk.Reservation)
     assert reservation.reservation_id == reservation_id
-    assert reservation.devices == [sdk.GrantedDevice("cpu", -1)]
+    assert reservation.devices == [sdk.DeviceAllocation("cpu", ram_mb=1024, compute_units=0)]
     assert "RESERVED_FD" not in os.environ
     assert not os.get_inheritable(fd)
 
@@ -322,7 +334,7 @@ def _run_launched_worker(mode):
     while client._query_status(socket_path)["reservations"]:
         assert time.monotonic() < deadline, "daemon did not reclaim the worker's lease"
         time.sleep(0.01)
-    with sdk.Reservation("ordinary", sdk.ExplicitSlot("cpu", ram_mb=1024)) as ordinary:
+    with sdk.Reservation("ordinary", sdk.DeviceConstraint(name="cpu", ram_mb=1024)) as ordinary:
         ordinary.check()
 
 

@@ -2,13 +2,15 @@
 reserved SDK — Python client library for the reserved daemon.
 """
 
+from reserved.core import DeviceAllocation
+
 from .client import (
     DeviceConstraint,
-    ExplicitSlot,
-    GrantedDevice,
     Request,
     Reservation,
     adopt_inherited_lease,
+    torch_cuda_uuid,
+    torch_device,
 )
 from .errors import (
     DaemonNotRunningError,
@@ -23,8 +25,9 @@ __all__ = [
     "adopt_inherited_lease",
     "Request",
     "DeviceConstraint",
-    "ExplicitSlot",
-    "GrantedDevice",
+    "DeviceAllocation",
+    "torch_device",
+    "torch_cuda_uuid",
     "ConsolidateSolver",
     "SpreadSolver",
     "ReservationError",

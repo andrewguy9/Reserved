@@ -136,7 +136,6 @@ class _StatusHandler(BaseHTTPRequestHandler):
                 f"<tr>"
                 f"<td>{escape(d.name)}</td>"
                 f"<td>{escape(d.type)}</td>"
-                f"<td>{escape(d.model or '')}</td>"
                 f"<td>{d.available_ram_mb}/{d.ram_mb} MB</td>"
                 f"<td>{d.available_compute_units}/{d.compute_units}</td>"
                 f"</tr>\n"
@@ -146,10 +145,10 @@ class _StatusHandler(BaseHTTPRequestHandler):
         for r in result.reservations:
             age = int(now - r.created_at)
             age_str = f"{age // 60}m{age % 60}s"
-            slot_cells = [
-                f"<td>{escape(s.device_name)}</td>"
+            allocation_cells = [
+                f"<td>{escape(s.name)}</td>"
                 f"<td>{s.ram_mb} MB</td><td>{s.compute_units}</td>"
-                for s in r.slots
+                for s in r.allocations
             ] or ["<td>—</td><td>—</td><td>—</td>"]
             rows_reservations += "".join(
                 f"<tr>"
@@ -158,7 +157,7 @@ class _StatusHandler(BaseHTTPRequestHandler):
                 f"<td>{age_str}</td>"
                 f"{cells}"
                 f"</tr>\n"
-                for cells in slot_cells
+                for cells in allocation_cells
             )
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -174,7 +173,7 @@ h2{{margin-top:1.5em}}
 <h1>reserved status</h1>
 <h2>Devices</h2>
 <table>
-<tr><th>Name</th><th>Type</th><th>Model</th><th>RAM</th><th>Compute</th></tr>
+<tr><th>Name</th><th>Type</th><th>RAM</th><th>Compute</th></tr>
 {rows_devices}
 </table>
 <h2>Reservations</h2>
