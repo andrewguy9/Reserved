@@ -18,9 +18,9 @@ if TYPE_CHECKING:
     from .client import DeviceConstraint, ReservationSpec
 
 from ..core import (
+    DeviceAllocation,
     ReservationRequest,
     ReserveRequest,
-    SlotRequest,
 )
 
 
@@ -74,10 +74,10 @@ class ConsolidateSolver:
         res_requests: list[ReservationRequest] = []
 
         for label, slots in reservations:
-            slot_requests: list[SlotRequest] = []
+            allocations: list[DeviceAllocation] = []
             for slot in slots:
                 if isinstance(slot, ExplicitSlot):
-                    slot_requests.append(SlotRequest(
+                    allocations.append(DeviceAllocation(
                         name=slot.name,
                         ram_mb=slot.ram_mb,
                         compute_units=slot.compute_units,
@@ -100,7 +100,7 @@ class ConsolidateSolver:
                     # Consolidate: prefer device with least available RAM
                     # (most full) that still fits.
                     best = min(candidates, key=lambda d: d["available_ram_mb"])
-                    slot_requests.append(SlotRequest(
+                    allocations.append(DeviceAllocation(
                         name=best["name"],
                         ram_mb=slot.ram_mb,
                         compute_units=slot.compute_units,
@@ -110,7 +110,7 @@ class ConsolidateSolver:
 
             res_requests.append(ReservationRequest(
                 label=label,
-                slots=tuple(slot_requests),
+                slots=tuple(allocations),
             ))
 
         return ReserveRequest(reservations=tuple(res_requests))
@@ -136,10 +136,10 @@ class SpreadSolver:
         res_requests: list[ReservationRequest] = []
 
         for label, slots in reservations:
-            slot_requests: list[SlotRequest] = []
+            allocations: list[DeviceAllocation] = []
             for slot in slots:
                 if isinstance(slot, ExplicitSlot):
-                    slot_requests.append(SlotRequest(
+                    allocations.append(DeviceAllocation(
                         name=slot.name,
                         ram_mb=slot.ram_mb,
                         compute_units=slot.compute_units,
@@ -159,7 +159,7 @@ class SpreadSolver:
                         )
                     # Spread: prefer device with most available RAM (most empty).
                     best = max(candidates, key=lambda d: d["available_ram_mb"])
-                    slot_requests.append(SlotRequest(
+                    allocations.append(DeviceAllocation(
                         name=best["name"],
                         ram_mb=slot.ram_mb,
                         compute_units=slot.compute_units,
@@ -169,7 +169,7 @@ class SpreadSolver:
 
             res_requests.append(ReservationRequest(
                 label=label,
-                slots=tuple(slot_requests),
+                slots=tuple(allocations),
             ))
 
         return ReserveRequest(reservations=tuple(res_requests))

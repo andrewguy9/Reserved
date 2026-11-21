@@ -23,9 +23,9 @@ from typing import Any, Sequence
 
 from reserved import protocol
 from reserved.core import (
+    DeviceAllocation,
     ReservationRequest,
     ReserveRequest,
-    SlotRequest,
 )
 from reserved.paths import client_socket_override as _get_socket_override, client_socket_paths
 from reserved.sdk.errors import (
@@ -315,13 +315,13 @@ class Reservation:
 
     def _acquire_single(self) -> None:
         """Acquire this reservation by itself (not part of a multi-reservation Request)."""
-        from ..core import ReservationRequest, ReserveRequest, SlotRequest
+        from ..core import DeviceAllocation, ReservationRequest, ReserveRequest
         socket_path = _get_socket_override(self._socket_path)
 
         if self._all_explicit():
             # Skip solver step.
             slots = [
-                SlotRequest(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
+                DeviceAllocation(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
                 for s in self._slots
             ]
             req = ReserveRequest(reservations=(
@@ -583,11 +583,11 @@ class Request:
         return tuple(result)
 
     def _build_explicit_request(self) -> ReserveRequest:
-        from ..core import ReservationRequest, ReserveRequest, SlotRequest
+        from ..core import DeviceAllocation, ReservationRequest, ReserveRequest
         res_reqs = []
         for r in self._reservations:
             slots = [
-                SlotRequest(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
+                DeviceAllocation(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
                 for s in r._slots
             ]
             res_reqs.append(ReservationRequest(label=r.label, slots=tuple(slots)))

@@ -13,7 +13,7 @@ if _here not in sys.path:
     sys.path.insert(0, _here)
 
 from reserved.cli import parse_options, usage_error
-from reserved.core import ReservationRequest, ReserveRequest, SlotRequest
+from reserved.core import DeviceAllocation, ReservationRequest, ReserveRequest
 from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import (
     DeviceConstraint,
@@ -91,13 +91,13 @@ def build_reserve_request(
     all_explicit = all(isinstance(s, ExplicitSlot) for s in slots)
 
     if all_explicit or not slots:
-        slot_reqs = [
-            SlotRequest(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
+        allocations = [
+            DeviceAllocation(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
             for s in slots
             if isinstance(s, ExplicitSlot)
         ]
         return ReserveRequest(reservations=(
-            ReservationRequest(label=label, slots=tuple(slot_reqs)),
+            ReservationRequest(label=label, slots=tuple(allocations)),
         ))
 
     if devices is None:

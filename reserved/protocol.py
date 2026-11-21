@@ -15,6 +15,7 @@ from typing import Any
 
 from .core import (
     ActiveReservation,
+    DeviceAllocation,
     DeviceStatus,
     GrantFailure,
     GrantSuccess,
@@ -22,7 +23,6 @@ from .core import (
     ReservationRequest,
     ReservationStatus,
     ReserveRequest,
-    SlotRequest,
     StatusResult,
 )
 
@@ -65,7 +65,7 @@ def wire_to_reserve_request(obj: dict) -> ReserveRequest:
     for r in raw_reservations:
         slots = []
         for s in r.get("slots", []):
-            slots.append(SlotRequest(
+            slots.append(DeviceAllocation(
                 name=s["name"],
                 ram_mb=int(s.get("ram_mb", 0)),
                 compute_units=int(s.get("compute_units", 0)),

@@ -11,12 +11,12 @@ from reserved.core import (
     ActiveReservation,
     Device,
     DeviceAvailability,
+    DeviceAllocation,
     GrantFailure,
     GrantSuccess,
     Ledger,
     ReservationRequest,
     ReserveRequest,
-    SlotRequest,
     grant,
     load_ledger,
     release,
@@ -51,7 +51,7 @@ def simple_request(
     return ReserveRequest(reservations=(
         ReservationRequest(
             label=label,
-            slots=(SlotRequest(name=device_name, ram_mb=ram_mb, compute_units=compute_units),),
+            slots=(DeviceAllocation(name=device_name, ram_mb=ram_mb, compute_units=compute_units),),
         ),
     ))
 
@@ -148,8 +148,8 @@ class TestMetalGrant:
         ledger = load_ledger(METAL_CONFIG)
         req = ReserveRequest(reservations=(
             ReservationRequest(label="pipeline", slots=(
-                SlotRequest(name="metal:0", ram_mb=8192),
-                SlotRequest(name="cpu", ram_mb=16384),
+                DeviceAllocation(name="metal:0", ram_mb=8192),
+                DeviceAllocation(name="cpu", ram_mb=16384),
             )),
         ))
         new_ledger, result = grant(ledger, req)
@@ -331,11 +331,11 @@ class TestGrantAtomic:
         return ReserveRequest(reservations=(
             ReservationRequest(
                 label="checkpoint",
-                slots=(SlotRequest(name="cuda:2", ram_mb=8192, compute_units=0),),
+                slots=(DeviceAllocation(name="cuda:2", ram_mb=8192, compute_units=0),),
             ),
             ReservationRequest(
                 label="lora",
-                slots=(SlotRequest(name="cuda:2", ram_mb=2048, compute_units=0),),
+                slots=(DeviceAllocation(name="cuda:2", ram_mb=2048, compute_units=0),),
             ),
         ))
 
@@ -368,11 +368,11 @@ class TestGrantAtomic:
         req = ReserveRequest(reservations=(
             ReservationRequest(
                 label="ok",
-                slots=(SlotRequest(name="cuda:0", ram_mb=8192),),
+                slots=(DeviceAllocation(name="cuda:0", ram_mb=8192),),
             ),
             ReservationRequest(
                 label="toobig",
-                slots=(SlotRequest(name="cuda:0", ram_mb=99999),),
+                slots=(DeviceAllocation(name="cuda:0", ram_mb=99999),),
             ),
         ))
         new_ledger, result = grant(ledger, req)
@@ -386,11 +386,11 @@ class TestGrantAtomic:
         req = ReserveRequest(reservations=(
             ReservationRequest(
                 label="r1",
-                slots=(SlotRequest(name="cuda:0", ram_mb=8192),),
+                slots=(DeviceAllocation(name="cuda:0", ram_mb=8192),),
             ),
             ReservationRequest(
                 label="r2",
-                slots=(SlotRequest(name="cuda:1", ram_mb=4096),),
+                slots=(DeviceAllocation(name="cuda:1", ram_mb=4096),),
             ),
         ))
         new_ledger, result = grant(ledger, req)
@@ -406,8 +406,8 @@ class TestGrantAtomic:
             ReservationRequest(
                 label="distributed",
                 slots=(
-                    SlotRequest(name="cuda:0", ram_mb=4096),
-                    SlotRequest(name="cuda:1", ram_mb=4096),
+                    DeviceAllocation(name="cuda:0", ram_mb=4096),
+                    DeviceAllocation(name="cuda:1", ram_mb=4096),
                 ),
             ),
         ))
