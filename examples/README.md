@@ -26,12 +26,21 @@ nvidia-smi -L
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 ```
 
-The example configs use placeholder UUIDs. Replace each `cuda:GPU-...` name
-with a UUID from `nvidia-smi -L`, and use the same names in the `reserve`
-commands below. A UUID names one specific card, so no device-ordering setting
-is needed. Adjust the `ram_mb` budgets to your machine. These budgets are
-entries in the reservation ledger. Choose them based on the memory you can
-commit to participating workloads.
+The example configs use placeholder UUIDs. Generate a config for the cards
+actually in the machine instead of editing them by hand:
+
+```bash
+python examples/cuda_config.py > /tmp/reserved-cuda.json
+```
+
+[cuda_config.py](cuda_config.py) reads each card's UUID, product name, and
+total memory from `nvidia-smi`, names the devices `cuda:GPU-<uuid>`, labels
+each `model` as the lowercased product name (`rtx-a6000`), and sets `ram_mb` to
+the card's full memory. A UUID names one specific card, so no device-ordering
+setting is needed. Pass `--ram-fraction 0.9` to commit only part of each card;
+budgets are entries in the reservation ledger and should reflect the memory you
+can commit to participating workloads. Use the generated names in the
+`reserve` commands below.
 
 In the first terminal, start a demo daemon. Use [cuda.json](cuda.json) for one
 card or substitute [cuda_dual.json](cuda_dual.json) for two cards. Stop the demo
