@@ -78,7 +78,7 @@ class TestLoadLedger:
         with pytest.raises(ValueError, match="cuda:GPU-<uuid>"):
             load_ledger(cfg)
 
-    def test_invalid_cuda_name_ordinal_is_rejected(self):
+    def test_invalid_cuda_name_index_form_is_rejected(self):
         cfg = {"devices": [{"name": "cuda:0", "type": "cuda", "ram_mb": 8192}]}
         with pytest.raises(ValueError, match="nvidia-smi -L"):
             load_ledger(cfg)
