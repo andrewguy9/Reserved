@@ -6,7 +6,7 @@ Public API:
   adopt_inherited_lease()
   Request(*reservations, socket_path=None)
   DeviceConstraint(type, *, name=None, ram_mb=0, compute_units=0)
-  GrantedDevice(device_name)
+  torch_device(allocation)   # PyTorch device for one granted DeviceAllocation
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reserved import protocol
-from reserved.core import ReserveRequest, cuda_uuid
+from reserved.core import DeviceAllocation, ReserveRequest, cuda_uuid
 from reserved.paths import client_socket_override as _get_socket_override, client_socket_paths
 from reserved.sdk.errors import (
     DaemonNotRunningError,
@@ -81,38 +81,32 @@ class DeviceConstraint:
 
 
 # ---------------------------------------------------------------------------
-# GrantedDevice — returned to callers after acquire()
+# PyTorch device resolution for granted allocations
 # ---------------------------------------------------------------------------
 
-@dataclass
-class GrantedDevice:
-    """A physical device allocation granted by the daemon."""
-    device_name: str  # Physical device name, e.g. "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782".
+def torch_device(allocation: DeviceAllocation) -> Any:
+    """Return the process-local PyTorch device for one granted allocation.
 
-    def torch_device(self) -> Any:
-        """Return the process-local PyTorch device for this physical grant.
-
-        PyTorch is expected to be installed in the calling process; this
-        package does not declare or install it, and no other SDK operation
-        imports it. A CUDA grant resolves to the device torch reports with
-        the same GPU UUID, so the result is correct under any
-        CUDA_VISIBLE_DEVICES, set or unset, and the SDK never reads or writes
-        the mask. This initializes CUDA in the calling process, so call it in
-        the process that will use the GPU. A grant torch cannot see, a torch
-        build that does not report device UUIDs, and unsupported device kinds
-        raise ReservationError.
-        """
-        device_type = self.device_name.partition(":")[0]
-        import torch  # type: ignore[import]
-        if device_type == "cuda":
-            torch_name = f"cuda:{_torch_cuda_index(self.device_name, torch)}"
-        elif device_type == "metal":
-            torch_name = "mps"
-        elif device_type == "cpu":
-            torch_name = "cpu"
-        else:
-            raise ReservationError(f"unsupported PyTorch device {self.device_name!r}")
-        return torch.device(torch_name)
+    PyTorch is expected to be installed in the calling process; this package
+    does not declare or install it, and no other SDK operation imports it. A
+    CUDA grant resolves to the device torch reports with the same GPU UUID,
+    so the result is correct under any CUDA_VISIBLE_DEVICES, set or unset,
+    and the SDK never reads or writes the mask. This initializes CUDA in the
+    calling process, so call it in the process that will use the GPU. A
+    grant torch cannot see, a torch build that does not report device UUIDs,
+    and unsupported device kinds raise ReservationError.
+    """
+    device_type = allocation.name.partition(":")[0]
+    import torch  # type: ignore[import]
+    if device_type == "cuda":
+        torch_name = f"cuda:{_torch_cuda_index(allocation.name, torch)}"
+    elif device_type == "metal":
+        torch_name = "mps"
+    elif device_type == "cpu":
+        torch_name = "cpu"
+    else:
+        raise ReservationError(f"unsupported PyTorch device {allocation.name!r}")
+    return torch.device(torch_name)
 
 
 def _torch_cuda_index(physical_name: str, torch_module: Any) -> int:
@@ -263,7 +257,7 @@ class Reservation:
     Typically used as a context manager:
 
         with Reservation("train", DeviceConstraint("cuda", ram_mb=16384)) as r:
-            model.to(r.devices[0].torch_device())
+            model.to(r.torch_devices()[0])
             run_training()
 
     Can also be acquired manually:
@@ -292,9 +286,9 @@ class Reservation:
         self._solver = solver if solver is not None else ConsolidateSolver()
         self._socket_path = socket_path
 
-        # Physical grant metadata set after acquisition or adoption.
+        # Granted allocations, set after acquisition or adoption.
         self.reservation_id: str | None = None
-        self.devices: list[GrantedDevice] = []
+        self.devices: list[DeviceAllocation] = []
         self._lease_sock: socket.socket | None = None
         self._inherited = False
 
@@ -339,10 +333,7 @@ class Reservation:
 
         granted = resp["reservations"][0]
         self.reservation_id = granted["reservation_id"]
-        self.devices = [
-            GrantedDevice(device_name=a["name"])
-            for a in granted["allocations"]
-        ]
+        self.devices = [_granted_allocation(a) for a in granted["allocations"]]
         if fds:
             self._lease_sock = socket.socket(fileno=fds[0])
         else:
@@ -386,8 +377,8 @@ class Reservation:
                 )
 
     def torch_devices(self) -> list[Any]:
-        """Return process-local PyTorch devices in physical grant order."""
-        return [d.torch_device() for d in self.devices]
+        """Return process-local PyTorch devices, one per granted allocation, in grant order."""
+        return [torch_device(a) for a in self.devices]
 
     def __repr__(self) -> str:
         return (
@@ -427,26 +418,33 @@ def _wrap_inherited_lease(fd_text: str) -> socket.socket:
             lease_sock.detach()
 
 
-def _parse_inherited_grants(grants_json: str | None) -> list[GrantedDevice]:
+def _granted_allocation(record: Any) -> DeviceAllocation:
+    """Parse one granted allocation record ({name, ram_mb, compute_units}).
+
+    Raises ValueError for a missing or mistyped field, or a CUDA name the
+    driver could not address.
+    """
+    if not isinstance(record, dict):
+        raise ValueError("allocation record is not an object")
+    name = record.get("name")
+    ram_mb = record.get("ram_mb")
+    compute_units = record.get("compute_units")
+    if not isinstance(name, str) or type(ram_mb) is not int or type(compute_units) is not int:
+        raise ValueError(f"malformed allocation record {record!r}")
+    if name.partition(":")[0] == "cuda":
+        cuda_uuid(name)
+    return DeviceAllocation(name=name, ram_mb=ram_mb, compute_units=compute_units)
+
+
+def _parse_inherited_grants(grants_json: str | None) -> list[DeviceAllocation]:
     if grants_json is None:
         raise ReservationError("RESERVED_GRANTED_ALLOCATIONS is missing; launch the worker with the updated reserve CLI")
 
     try:
         grants = json.loads(grants_json)
         if not isinstance(grants, list):
-            raise ValueError
-
-        devices: list[GrantedDevice] = []
-        for grant in grants:
-            if not isinstance(grant, dict):
-                raise ValueError
-            physical_name = grant.get("name")
-            if not isinstance(physical_name, str):
-                raise ValueError
-            if physical_name.partition(":")[0] == "cuda":
-                cuda_uuid(physical_name)  # reject a CUDA name the driver cannot address
-            devices.append(GrantedDevice(physical_name))
-        return devices
+            raise ValueError("grant metadata is not a list")
+        return [_granted_allocation(grant) for grant in grants]
     except (RecursionError, ValueError) as exc:
         raise ReservationError("RESERVED_GRANTED_ALLOCATIONS contains invalid grant metadata") from exc
 
@@ -542,10 +540,7 @@ class Request:
         result: list[Reservation] = []
         for res, granted, fd in zip(self._reservations, granted_list, fds):
             res.reservation_id = granted["reservation_id"]
-            res.devices = [
-                GrantedDevice(device_name=a["name"])
-                for a in granted["allocations"]
-            ]
+            res.devices = [_granted_allocation(a) for a in granted["allocations"]]
             res._lease_sock = socket.socket(fileno=fd)
             result.append(res)
 

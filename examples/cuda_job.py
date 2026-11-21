@@ -7,8 +7,7 @@ if __name__ == "__main__":
     with adopt_inherited_lease() as reservation:
         import torch
 
-        for grant in reservation.devices:
+        for grant, device in zip(reservation.devices, reservation.torch_devices()):
             reservation.check()
-            device = grant.torch_device()
             total = torch.arange(4, device=device).sum().item()
-            print(f"physical {grant.device_name} -> logical {device}: sum={total}")
+            print(f"physical {grant.name} -> logical {device}: sum={total}")

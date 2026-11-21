@@ -228,17 +228,17 @@ from reserved.sdk.errors import ReservationError, DaemonNotRunningError, Reserva
 ```python
 # Any CUDA device
 with Reservation("infer", DeviceConstraint("cuda")) as r:
-    model.to(r.devices[0].torch_device())
+    model.to(r.torch_devices()[0])
     run_model()
 
 # Metal (Apple Silicon)
 with Reservation("infer", DeviceConstraint("metal")) as r:
-    model.to(r.devices[0].torch_device())   # torch.device("mps")
+    model.to(r.torch_devices()[0])   # torch.device("mps")
     run_model()
 
 # Needs 30GB VRAM
 with Reservation("infer", DeviceConstraint("cuda", ram_mb=30720)) as r:
-    model.to(r.devices[0].torch_device())
+    model.to(r.torch_devices()[0])
     ...
 
 # Two distinct CUDA devices, released together
@@ -282,7 +282,7 @@ that the capacity fits, and the daemon checks again when it grants.
 ```python
 # Pin directly to a physical device
 with Reservation("infer", DeviceConstraint(name="cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", ram_mb=8192)) as r:
-    model.to(r.devices[0].torch_device())
+    model.to(r.torch_devices()[0])
     run_model()
 ```
 

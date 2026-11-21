@@ -200,7 +200,7 @@ claims that card. The CLI exports the name in `RESERVED_DEVICE` and
 the granted GPU. Multiple CUDA allocations contribute distinct UUIDs in first-grant
 order.
 
-`GrantedDevice.torch_device()` is the conversion boundary. It enumerates the
+`torch_device(allocation)` is the conversion boundary; `reservation.devices` holds the granted `DeviceAllocation` records it takes. It enumerates the
 CUDA devices torch can see, reads each one's UUID from its device properties,
 and returns the index whose UUID matches the grant. The worker above gets
 `torch.device("cuda:0")`. A process started with
@@ -264,7 +264,7 @@ reserved/
   paths.py       # socket discovery shared by daemon, SDK, and CLIs
   protocol.py    # single-line JSON serialization (explicit types only)
   sdk/
-    client.py    # Reservation, Request, DeviceConstraint, GrantedDevice
+    client.py    # Reservation, Request, DeviceConstraint, torch_device
     solvers.py   # ConsolidateSolver, SpreadSolver
     errors.py    # ReservationError, DaemonNotRunningError, ReservationExpiredError
   bin/
