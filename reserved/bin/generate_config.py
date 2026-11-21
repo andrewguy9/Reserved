@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a reserved config for the NVIDIA GPUs torch can see on this machine."""
+"""Generate a reserved config from the hardware detected on this machine."""
 
 from __future__ import annotations
 
@@ -18,24 +18,25 @@ from reserved.core import load_ledger
 from reserved.sdk import torch_cuda_uuid
 
 
-_USAGE = """Generate a reserved config for the NVIDIA GPUs torch can see.
+_USAGE = """Generate a reserved config from the hardware detected on this machine.
 
 Usage:
-    reserved-cuda-config [--ram-fraction F]
-    reserved-cuda-config (-h | --help)
+    reserved-generate-config [--ram-fraction F]
+    reserved-generate-config (-h | --help)
 
 Options:
     -h --help         Show this help.
-    --ram-fraction F  Fraction of each card's memory to commit to
+    --ram-fraction F  Fraction of each device's memory to commit to
                       reservations, in (0, 1] [default: 1.0].
 
-Reads each card's GPU UUID, total memory, and streaming multiprocessor count
-from torch's device properties and prints a config on stdout. Device names are
+Detects NVIDIA GPUs through torch's device properties: each card's GPU UUID,
+total memory, and streaming multiprocessor count. Device names are
 cuda:GPU-<uuid>, ram_mb is the card's memory in MiB, and compute_units is its
 multiprocessor count. Run it with no CUDA_VISIBLE_DEVICES so every card is
-listed. PyTorch with CUDA support must be importable.
+listed. PyTorch with CUDA support must be importable. Other device types are
+not detected yet; add them to the generated file by hand.
 
-    reserved-cuda-config > ~/.config/reserved/reserved.json
+    reserved-generate-config > ~/.config/reserved/reserved.json
 """
 
 MIB = 1024 * 1024
