@@ -13,7 +13,7 @@ if _here not in sys.path:
     sys.path.insert(0, _here)
 
 from reserved.cli import parse_options, usage_error
-from reserved.core import DeviceAllocation, ReservationRequest, ReserveRequest, cuda_uuid
+from reserved.core import ReserveRequest, cuda_uuid
 from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import (
     DeviceConstraint,
@@ -38,14 +38,13 @@ Options:
     --solver SOLVER  Select consolidate or spread [default: consolidate].
     --socket PATH    {SOCKET_PATH_HELP}
 
-DEVICE format: comma-separated key=value pairs. Each DEVICE is one
-allocation in the reservation: a constraint the solver places, or an explicit
-device when name= is given.
+DEVICE format: comma-separated key=value pairs. Each DEVICE is a constraint
+the solver resolves to one allocation; name= pins a specific device.
     type=TYPE        Device type (cuda, metal, cpu)
     model=MODEL      Device model label
     ram=MB           RAM in MB (alias for ram_mb)
     compute=N        Compute units (alias for compute_units)
-    name=NAME        Pin to a physical device (bypasses solver).
+    name=NAME        Pin to a physical device.
                      CUDA names are cuda:GPU-<uuid> as printed by nvidia-smi -L.
 
 Examples:
@@ -55,12 +54,8 @@ Examples:
 """
 
 
-def parse_device_spec(spec: str) -> DeviceConstraint | DeviceAllocation:
-    """Parse a DEVICE string like 'type=cuda,ram=8192'.
-
-    Returns a DeviceAllocation when the spec names a device, otherwise a
-    DeviceConstraint for the solver.
-    """
+def parse_device_spec(spec: str) -> DeviceConstraint:
+    """Parse a DEVICE string like 'type=cuda,ram=8192' into a DeviceConstraint."""
     fields: dict[str, str] = {}
     for part in spec.split(","):
         part = part.strip()
@@ -71,38 +66,23 @@ def parse_device_spec(spec: str) -> DeviceConstraint | DeviceAllocation:
         key, _, value = part.partition("=")
         fields[key.strip()] = value.strip()
 
-    physical_name = fields.get("name")
-    if physical_name is not None:
-        # Explicit allocation.
-        ram_mb = int(fields.get("ram", fields.get("ram_mb", 0)))
-        compute_units = int(fields.get("compute", fields.get("compute_units", 0)))
-        return DeviceAllocation(name=physical_name, ram_mb=ram_mb, compute_units=compute_units)
-    else:
-        # Constraint for the solver.
-        return DeviceConstraint(
-            type=fields.get("type"),
-            model=fields.get("model"),
-            ram_mb=int(fields.get("ram", fields.get("ram_mb", 0))),
-            compute_units=int(fields.get("compute", fields.get("compute_units", 0))),
-        )
+    return DeviceConstraint(
+        type=fields.get("type"),
+        model=fields.get("model"),
+        name=fields.get("name"),
+        ram_mb=int(fields.get("ram", fields.get("ram_mb", 0))),
+        compute_units=int(fields.get("compute", fields.get("compute_units", 0))),
+    )
 
 
 def build_reserve_request(
     label: str,
-    specs: list[DeviceConstraint | DeviceAllocation],
+    constraints: list[DeviceConstraint],
     solver: ConsolidateSolver | SpreadSolver,
-    devices: list[dict] | None = None,
+    devices: list[dict],
 ) -> ReserveRequest:
-    """Build the explicit daemon request for already-parsed CLI device specs."""
-    if all(isinstance(s, DeviceAllocation) for s in specs):
-        # Every spec is explicit (or there are none): no solver step.
-        return ReserveRequest(reservations=(
-            ReservationRequest(label=label, allocations=tuple(specs)),
-        ))
-
-    if devices is None:
-        raise ValueError("device status is required for device constraints")
-    return solver.solve([(label, specs)], devices)
+    """Resolve the CLI's constraints against *devices* from a status reply."""
+    return solver.solve([(label, constraints)], devices)
 
 
 def build_exec_env(
@@ -162,24 +142,20 @@ def main(argv: list[str] | None = None) -> None:
     socket_path = _get_socket_override(args["--socket"])
     solver = SpreadSolver() if solver_name == "spread" else ConsolidateSolver()
 
-    specs = [parse_device_spec(text) for text in args["DEVICE"]]
+    constraints = [parse_device_spec(text) for text in args["DEVICE"]]
     label = args["LABEL"]
 
-    if all(isinstance(s, DeviceAllocation) for s in specs):
-        req = build_reserve_request(label, specs, solver)
-    else:
-        # Run solver.
-        try:
-            status = _query_status(socket_path)
-        except DaemonNotRunningError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            sys.exit(2)
+    try:
+        status = _query_status(socket_path)
+    except DaemonNotRunningError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
-        try:
-            req = build_reserve_request(label, specs, solver, status["devices"])
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            sys.exit(1)
+    try:
+        req = build_reserve_request(label, constraints, solver, status["devices"])
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     # Submit request to daemon.
     try:

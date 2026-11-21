@@ -2,11 +2,10 @@
 client.py — Python SDK client for the reserved daemon.
 
 Public API:
-  Reservation(label, *devices, solver=ConsolidateSolver(), socket_path=None)
+  Reservation(label, *constraints, solver=ConsolidateSolver(), socket_path=None)
   adopt_inherited_lease()
   Request(*reservations, socket_path=None)
-  DeviceConstraint(type, *, model=None, ram_mb=0, compute_units=0)
-  DeviceAllocation(name, ram_mb=0, compute_units=0)   # explicit device, from reserved.core
+  DeviceConstraint(type, *, model=None, name=None, ram_mb=0, compute_units=0)
   GrantedDevice(device_name)
 """
 
@@ -23,12 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reserved import protocol
-from reserved.core import (
-    DeviceAllocation,
-    ReservationRequest,
-    ReserveRequest,
-    cuda_uuid,
-)
+from reserved.core import ReserveRequest, cuda_uuid
 from reserved.paths import client_socket_override as _get_socket_override, client_socket_paths
 from reserved.sdk.errors import (
     DaemonNotRunningError,
@@ -39,7 +33,7 @@ from reserved.sdk.errors import (
 from reserved.sdk.solvers import ConsolidateSolver
 
 # Type alias used by solvers.
-ReservationSpec = tuple[str, list]  # (label, list[DeviceConstraint | DeviceAllocation])
+ReservationSpec = tuple[str, list]  # (label, list[DeviceConstraint])
 
 _inherited_lease_lock = threading.Lock()
 _inherited_lease_adopted = False
@@ -55,17 +49,21 @@ os.register_at_fork(after_in_child=_reset_inherited_lease_lock)
 
 
 # ---------------------------------------------------------------------------
-# Device specifications (in-process only, never serialized)
+# Device constraints (in-process only, never serialized)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class DeviceConstraint:
-    """A device constraint: the solver picks a physical device that satisfies it.
+    """What a reservation needs from one device; the solver picks the device.
 
-    The explicit alternative is a ``DeviceAllocation``, which names the device.
+    Every field given narrows the choice. ``type`` and ``model`` must match
+    the device's config, ``name`` pins one physical device, and ``ram_mb``
+    and ``compute_units`` must fit in its available capacity. The solver
+    turns each constraint into a DeviceAllocation naming the chosen device.
     """
     type: str | None = None
     model: str | None = None
+    name: str | None = None
     ram_mb: int = 0
     compute_units: int = 0
 
@@ -74,11 +72,13 @@ class DeviceConstraint:
         type: str | None = None,
         *,
         model: str | None = None,
+        name: str | None = None,
         ram_mb: int = 0,
         compute_units: int = 0,
     ) -> None:
         self.type = type
         self.model = model
+        self.name = name
         self.ram_mb = ram_mb
         self.compute_units = compute_units
 
@@ -259,8 +259,9 @@ class Reservation:
     """
     A named reservation of one or more device allocations.
 
-    Each positional argument is a DeviceConstraint, which a solver resolves to
-    a device, or a DeviceAllocation, which names the device explicitly.
+    Each positional argument is a DeviceConstraint; the solver resolves every
+    constraint to a device against the daemon's current status. Pin a device
+    with ``DeviceConstraint(name=...)``.
 
     Typically used as a context manager:
 
@@ -279,12 +280,18 @@ class Reservation:
     def __init__(
         self,
         label: str,
-        *devices: DeviceConstraint | DeviceAllocation,
+        *constraints: DeviceConstraint,
         solver: ConsolidateSolver | None = None,
         socket_path: str | None = None,
     ) -> None:
+        for constraint in constraints:
+            if not isinstance(constraint, DeviceConstraint):
+                raise TypeError(
+                    f"Reservation takes DeviceConstraint arguments, got {constraint!r}; "
+                    "pin a device with DeviceConstraint(name=...)"
+                )
         self.label = label
-        self._devices = list(devices)
+        self._constraints = list(constraints)
         self._solver = solver if solver is not None else ConsolidateSolver()
         self._socket_path = socket_path
 
@@ -315,23 +322,13 @@ class Reservation:
 
     def _acquire_single(self) -> None:
         """Acquire this reservation by itself (not part of a multi-reservation Request)."""
-        from ..core import ReservationRequest, ReserveRequest
         socket_path = _get_socket_override(self._socket_path)
 
-        if self._all_explicit():
-            # Every device is already a DeviceAllocation: no solver step.
-            req = ReserveRequest(reservations=(
-                ReservationRequest(label=self.label, allocations=tuple(self._devices)),
-            ))
-        else:
-            status = _query_status(socket_path)
-            try:
-                req = self._solver.solve(
-                    [(self.label, self._devices)],
-                    status["devices"],
-                )
-            except ValueError as exc:
-                raise ReservationError(str(exc)) from exc
+        status = _query_status(socket_path)
+        try:
+            req = self._solver.solve([(self.label, self._constraints)], status["devices"])
+        except ValueError as exc:
+            raise ReservationError(str(exc)) from exc
 
         resp, fds = _send_reserve(socket_path, req, num_reservations=1)
         if not resp.get("ok"):
@@ -353,9 +350,6 @@ class Reservation:
             self._lease_sock = socket.socket(fileno=fds[0])
         else:
             self._lease_sock = None
-
-    def _all_explicit(self) -> bool:
-        return all(isinstance(d, DeviceAllocation) for d in self._devices)
 
     # ------------------------------------------------------------------
     # Public methods
@@ -533,14 +527,8 @@ class Request:
 
         socket_path = _get_socket_override(self._socket_path)
 
-        # Skip the solver only if every device in every reservation is explicit.
-        all_explicit = all(r._all_explicit() for r in self._reservations)
-
-        if all_explicit:
-            req = self._build_explicit_request()
-        else:
-            status = _query_status(socket_path)
-            req = self._solve(status["devices"])
+        status = _query_status(socket_path)
+        req = self._solve(status["devices"])
 
         num = len(self._reservations)
         resp, fds = _send_reserve(socket_path, req, num_reservations=num)
@@ -570,17 +558,10 @@ class Request:
 
         return tuple(result)
 
-    def _build_explicit_request(self) -> ReserveRequest:
-        from ..core import ReservationRequest, ReserveRequest
-        return ReserveRequest(reservations=tuple(
-            ReservationRequest(label=r.label, allocations=tuple(r._devices))
-            for r in self._reservations
-        ))
-
     def _solve(self, devices: list[dict]) -> ReserveRequest:
         # All reservations share the same solver (from the first one, or default).
         solver = self._reservations[0]._solver if self._reservations else ConsolidateSolver()
-        specs = [(r.label, r._devices) for r in self._reservations]
+        specs = [(r.label, r._constraints) for r in self._reservations]
         try:
             return solver.solve(specs, devices)
         except ValueError as exc:

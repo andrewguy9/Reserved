@@ -21,11 +21,11 @@ def test_parse_device_spec_ram_and_compute_aliases_are_equivalent():
     assert short == long
 
 
-def test_parse_device_spec_name_selects_explicit_allocation():
+def test_parse_device_spec_name_pins_the_device():
     spec = parse_device_spec("name=cuda:GPU-00000000-0000-0000-0000-000000000002,type=cuda,ram=4096,compute=50")
 
-    assert spec == DeviceAllocation(
-        name="cuda:GPU-00000000-0000-0000-0000-000000000002", ram_mb=4096, compute_units=50,
+    assert spec == DeviceConstraint(
+        "cuda", name="cuda:GPU-00000000-0000-0000-0000-000000000002", ram_mb=4096, compute_units=50,
     )
 
 
@@ -45,13 +45,21 @@ def test_main_rejects_invalid_invocations(argv, message, capsys):
     assert message in capsys.readouterr().err
 
 
-def test_build_reserve_request_for_explicit_allocations_passes_them_through():
-    specs = [
-        DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000001", ram_mb=4096, compute_units=25),
-        DeviceAllocation("cpu", ram_mb=1024),
+STATUS_DEVICES = [
+    {"name": "cuda:GPU-00000000-0000-0000-0000-000000000001", "type": "cuda", "model": None,
+     "ram_mb": 8192, "available_ram_mb": 8192, "compute_units": 100, "available_compute_units": 100},
+    {"name": "cpu", "type": "cpu", "model": None,
+     "ram_mb": 4096, "available_ram_mb": 4096, "compute_units": 0, "available_compute_units": 0},
+]
+
+
+def test_build_reserve_request_resolves_named_constraints_in_order():
+    constraints = [
+        DeviceConstraint(name="cuda:GPU-00000000-0000-0000-0000-000000000001", ram_mb=4096, compute_units=25),
+        DeviceConstraint(name="cpu", ram_mb=1024),
     ]
 
-    req = build_reserve_request("job", specs, ConsolidateSolver())
+    req = build_reserve_request("job", constraints, ConsolidateSolver(), STATUS_DEVICES)
 
     assert req.reservations == (
         ReservationRequest(label="job", allocations=(
@@ -61,8 +69,8 @@ def test_build_reserve_request_for_explicit_allocations_passes_them_through():
     )
 
 
-def test_build_reserve_request_without_devices_is_valid_marker_reservation():
-    req = build_reserve_request("marker", [], ConsolidateSolver())
+def test_build_reserve_request_without_constraints_is_valid_marker_reservation():
+    req = build_reserve_request("marker", [], ConsolidateSolver(), STATUS_DEVICES)
 
     assert req.reservations == (
         ReservationRequest(label="marker", allocations=()),
@@ -90,11 +98,6 @@ def test_build_reserve_request_delegates_constraints_to_solver():
 
     assert solver.calls == [([("job", specs)], devices)]
     assert req.reservations[0].allocations[0] == DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000000", ram_mb=2048)
-
-
-def test_build_reserve_request_requires_status_for_constraints():
-    with pytest.raises(ValueError, match="device status"):
-        build_reserve_request("job", [DeviceConstraint("cuda")], ConsolidateSolver())
 
 
 def test_build_exec_env_sets_reservation_metadata_without_mutating_base_env():

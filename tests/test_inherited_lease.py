@@ -218,8 +218,8 @@ def test_sdk_keeps_physical_grant_order_with_reordered_cuda_visibility(daemon_en
     # torch sees physical 5 first, then 2: the SDK resolves by UUID, not by position.
     monkeypatch.setitem(sys.modules, "torch", fake_torch(CUDA5, CUDA2))
     with sdk.Reservation(
-        "direct", sdk.DeviceAllocation(CUDA2), sdk.DeviceAllocation(CUDA5),
-        sdk.DeviceAllocation(CUDA2), socket_path=daemon_env["RESERVED_SOCKET"],
+        "direct", sdk.DeviceConstraint(name=CUDA2), sdk.DeviceConstraint(name=CUDA5),
+        sdk.DeviceConstraint(name=CUDA2), socket_path=daemon_env["RESERVED_SOCKET"],
     ) as lease:
         assert lease.devices == [
             sdk.GrantedDevice(CUDA2), sdk.GrantedDevice(CUDA5),
@@ -331,7 +331,7 @@ def _run_launched_worker(mode):
     while client._query_status(socket_path)["reservations"]:
         assert time.monotonic() < deadline, "daemon did not reclaim the worker's lease"
         time.sleep(0.01)
-    with sdk.Reservation("ordinary", sdk.DeviceAllocation("cpu", ram_mb=1024)) as ordinary:
+    with sdk.Reservation("ordinary", sdk.DeviceConstraint(name="cpu", ram_mb=1024)) as ordinary:
         ordinary.check()
 
 

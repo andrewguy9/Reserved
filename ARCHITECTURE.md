@@ -34,9 +34,10 @@ Users typically don't know or care which physical device they get — they just 
 ```
 constraint: type=cuda  ram_mb=8192
 constraint: type=cuda  model=rtx3090
+constraint: name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782  ram_mb=8192
 ```
 
-A **constraint solver** resolves constraints against current device status and produces an explicit request before submitting to the daemon.
+Every field narrows the choice: `type` and `model` match the device config, `name` pins one physical device, and `ram_mb` and `compute_units` must fit its available capacity. A **constraint solver** resolves constraints against current device status and produces an explicit request before submitting to the daemon. The SDK and CLI accept only constraints; a pinned device is a constraint with a `name`.
 
 ### Constraint solvers
 
@@ -45,7 +46,7 @@ A **constraint solver** resolves constraints against current device status and p
 | `ConsolidateSolver` | Packs allocations onto as few devices as possible | Yes |
 | `SpreadSolver` | Distributes allocations across as many devices as possible | No |
 
-Any caller can bypass solvers by submitting an explicit request directly to the daemon — this is what sophisticated orchestrators do after running their own placement algorithm.
+An orchestrator that runs its own placement expresses the result as `name` constraints, or speaks the explicit protocol to the daemon directly.
 
 ```
 Constraint spec  →  Solver (reads status)  →  Explicit request  →  Daemon (check-and-subtract)

@@ -4,7 +4,6 @@ Tests for reserved/sdk/solvers.py — constraint solvers.
 
 import pytest
 
-from reserved.core import DeviceAllocation
 from reserved.sdk.client import DeviceConstraint
 from reserved.sdk.solvers import ConsolidateSolver, SpreadSolver
 
@@ -82,10 +81,32 @@ class TestConsolidateSolver:
         assert chosen in ("cuda:GPU-00000000-0000-0000-0000-000000000000", "cuda:GPU-00000000-0000-0000-0000-000000000002")
         assert chosen != "cuda:GPU-00000000-0000-0000-0000-000000000001"
 
-    def test_explicit_allocation_passthrough(self):
-        req = self._solve([("job", [DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000002", ram_mb=4096)])])
-        assert req.reservations[0].allocations[0].name == "cuda:GPU-00000000-0000-0000-0000-000000000002"
+    def test_name_pins_the_device(self):
+        name = "cuda:GPU-00000000-0000-0000-0000-000000000002"
+        req = self._solve([("job", [DeviceConstraint(name=name, ram_mb=4096)])])
+        assert req.reservations[0].allocations[0].name == name
         assert req.reservations[0].allocations[0].ram_mb == 4096
+
+    def test_name_with_mismatched_type_raises(self):
+        name = "cuda:GPU-00000000-0000-0000-0000-000000000002"
+        with pytest.raises(ValueError, match="no device"):
+            self._solve([("job", [DeviceConstraint("cpu", name=name)])])
+
+    def test_name_with_insufficient_capacity_raises(self):
+        name = "cuda:GPU-00000000-0000-0000-0000-000000000001"  # 8192 MB available
+        with pytest.raises(ValueError, match="no device"):
+            self._solve([("job", [DeviceConstraint(name=name, ram_mb=8193)])])
+
+    def test_repeated_name_claims_accumulate_within_a_request(self):
+        name = "cuda:GPU-00000000-0000-0000-0000-000000000001"  # 8192 MB available
+        req = self._solve([("job", [
+            DeviceConstraint(name=name, ram_mb=4096), DeviceConstraint(name=name, ram_mb=4096),
+        ])])
+        assert [a.name for a in req.reservations[0].allocations] == [name, name]
+        with pytest.raises(ValueError, match="no device"):
+            self._solve([("job", [
+                DeviceConstraint(name=name, ram_mb=4096), DeviceConstraint(name=name, ram_mb=4097),
+            ])])
 
     def test_no_matching_device_raises(self):
         with pytest.raises(ValueError, match="no device"):
@@ -163,9 +184,10 @@ class TestSpreadSolver:
         names = [s.name for s in allocations]
         assert names[0] != names[1]
 
-    def test_explicit_allocation_passthrough(self):
-        req = self._solve([("job", [DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000001", ram_mb=2048)])])
-        assert req.reservations[0].allocations[0].name == "cuda:GPU-00000000-0000-0000-0000-000000000001"
+    def test_name_pins_the_device(self):
+        name = "cuda:GPU-00000000-0000-0000-0000-000000000001"
+        req = self._solve([("job", [DeviceConstraint(name=name, ram_mb=2048)])])
+        assert req.reservations[0].allocations[0].name == name
 
     def test_no_matching_device_raises(self):
         with pytest.raises(ValueError, match="no device"):

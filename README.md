@@ -223,7 +223,7 @@ PyTorch uses logical `cuda:0` in that process.
 Use the SDK when an application can participate in reservations directly. The SDK talks to the daemon, holds the lease fd for the lifetime of each `Reservation`, and exposes granted devices to application code.
 
 ```python
-from reserved.sdk import Reservation, Request, DeviceConstraint, DeviceAllocation
+from reserved.sdk import Reservation, Request, DeviceConstraint
 from reserved.sdk.errors import ReservationError, DaemonNotRunningError, ReservationExpiredError
 ```
 
@@ -246,8 +246,8 @@ with Reservation("infer", DeviceConstraint("cuda", ram_mb=30720)) as r:
     ...
 
 # Two distinct CUDA devices, released together
-with Reservation("distributed", DeviceAllocation("cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", ram_mb=1024),
-                 DeviceAllocation("cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781", ram_mb=1024)) as r:
+with Reservation("distributed", DeviceConstraint(name="cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", ram_mb=1024),
+                 DeviceConstraint(name="cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781", ram_mb=1024)) as r:
     devices = r.torch_devices()
     run_distributed(devices)
 ```
@@ -280,9 +280,12 @@ that capacity before releasing it; Reserved does not free GPU memory itself.
 
 ### Explicit placement (orchestrator)
 
+A constraint with `name=` pins one physical device. The solver only checks
+that the capacity fits, and the daemon checks again when it grants.
+
 ```python
 # Pin directly to a physical device
-with Reservation("infer", DeviceAllocation("cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", ram_mb=8192)) as r:
+with Reservation("infer", DeviceConstraint(name="cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", ram_mb=8192)) as r:
     model.to(r.devices[0].torch_device())
     run_model()
 ```

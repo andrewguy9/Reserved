@@ -8,6 +8,7 @@ import types
 
 import pytest
 
+from reserved.core import DeviceAllocation
 from reserved.sdk.client import GrantedDevice, Reservation, _connect
 from reserved.sdk.errors import DaemonNotRunningError, ReservationError, ReservationExpiredError
 import reserved.sdk.client as client_module
@@ -82,6 +83,11 @@ def test_granted_device_rejects_unsupported_torch_device(monkeypatch):
 
     with pytest.raises(ReservationError, match="fpga:0"):
         GrantedDevice("fpga:0").torch_device()
+
+
+def test_reservation_rejects_arguments_that_are_not_constraints():
+    with pytest.raises(TypeError, match="DeviceConstraint"):
+        Reservation("job", DeviceAllocation("cpu", ram_mb=1024))
 
 
 def test_reservation_release_closes_lease_socket_and_is_idempotent():
