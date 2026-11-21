@@ -129,7 +129,7 @@ the [resource config reference](README.md#resource-config).
 | Use case | Starting point | Lifetime owner |
 | --- | --- | --- |
 | Python worker that can check its lease between batches | `Reservation` context manager | The worker |
-| Existing command that needs a reservation and CUDA masking | `reserve LABEL SLOT -- CMD` | The command and any inherited lease copies |
+| Existing command that needs a reservation and CUDA masking | `reserve LABEL DEVICE -- CMD` | The command and any inherited lease copies |
 | Python worker launched by `reserve` that checks or releases its lease | `adopt_inherited_lease()` | The worker and any inherited lease copies |
 | Several reservations that must be granted together | `Request(...).acquire()` | The caller, with explicit `release()` cleanup |
 | Coordinator inspecting capacity | `reserve-status --json` | Status is a snapshot and holds no capacity |

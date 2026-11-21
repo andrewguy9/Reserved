@@ -55,7 +55,7 @@ def fetch_dashboard(ledger):
     return html, parser.tables
 
 
-@pytest.mark.parametrize("slots, expected", [
+@pytest.mark.parametrize("allocations, expected", [
     ((core.DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000000", 1024, 1),), [
         ["abc123", "infer", "1m0s", "cuda:GPU-00000000-0000-0000-0000-000000000000", "1024 MB", "1"],
     ]),
@@ -66,10 +66,10 @@ def fetch_dashboard(ledger):
     ]),
     ((), [["abc123", "infer", "1m0s", "—", "—", "—"]]),
 ])
-def test_reservation_values_match_their_column_headers(monkeypatch, slots, expected):
+def test_reservation_values_match_their_column_headers(monkeypatch, allocations, expected):
     monkeypatch.setattr(daemon.time, "time", lambda: 160.0)
     ledger = core.Ledger(availability=(), reservations=(
-        core.ActiveReservation("abc123", "infer", slots, 100.0),
+        core.ActiveReservation("abc123", "infer", allocations, 100.0),
     ))
 
     _, tables = fetch_dashboard(ledger)

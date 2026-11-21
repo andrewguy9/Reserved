@@ -2,9 +2,10 @@
 reserved SDK — Python client library for the reserved daemon.
 """
 
+from reserved.core import DeviceAllocation
+
 from .client import (
     DeviceConstraint,
-    ExplicitSlot,
     GrantedDevice,
     Request,
     Reservation,
@@ -23,7 +24,7 @@ __all__ = [
     "adopt_inherited_lease",
     "Request",
     "DeviceConstraint",
-    "ExplicitSlot",
+    "DeviceAllocation",
     "GrantedDevice",
     "ConsolidateSolver",
     "SpreadSolver",

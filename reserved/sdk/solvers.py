@@ -2,12 +2,13 @@
 solvers.py — Constraint solvers for the reserved SDK.
 
 Solvers live entirely in the SDK — they never cross the wire. A solver reads
-the current device status, resolves DeviceConstraint objects to explicit slot
-assignments, and returns a ReserveRequest ready to send to the daemon.
+the current device status, resolves each DeviceConstraint to an explicit
+DeviceAllocation, and returns a ReserveRequest ready to send to the daemon.
+A DeviceAllocation given directly passes through unchanged.
 
 Two built-in solvers:
-  - ConsolidateSolver: pack slots onto fewest physical devices (default).
-  - SpreadSolver: distribute slots across as many physical devices as possible.
+  - ConsolidateSolver: pack allocations onto fewest physical devices (default).
+  - SpreadSolver: distribute allocations across as many physical devices as possible.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ def _matches(device: DeviceStatusDict, constraint: "DeviceConstraint") -> bool:
 
 class ConsolidateSolver:
     """
-    Pack slots onto as few physical devices as possible.
+    Pack allocations onto as few physical devices as possible.
 
     For each constraint, pick the eligible device that has the least remaining
     available RAM (i.e. most full) while still satisfying the constraint.
@@ -62,39 +63,34 @@ class ConsolidateSolver:
         """
         Resolve constraints to an explicit ReserveRequest.
 
-        *reservations* is a list of (label, slots) where each slot is either a
-        DeviceConstraint or an ExplicitSlot.  *devices* is the list of device
+        *reservations* is a list of (label, specs) where each spec is either a
+        DeviceConstraint or a DeviceAllocation.  *devices* is the list of device
         dicts from a status response.
         """
-        from .client import DeviceConstraint, ExplicitSlot
 
         # Work with a mutable copy of available capacities for simulation.
         avail: dict[str, dict] = {d["name"]: dict(d) for d in devices}
 
         res_requests: list[ReservationRequest] = []
 
-        for label, slots in reservations:
+        for label, specs in reservations:
             allocations: list[DeviceAllocation] = []
-            for slot in slots:
-                if isinstance(slot, ExplicitSlot):
-                    allocations.append(DeviceAllocation(
-                        name=slot.name,
-                        ram_mb=slot.ram_mb,
-                        compute_units=slot.compute_units,
-                    ))
+            for spec in specs:
+                if isinstance(spec, DeviceAllocation):
+                    allocations.append(spec)
                     # Update simulated availability.
-                    if slot.name in avail:
-                        avail[slot.name]["available_ram_mb"] -= slot.ram_mb
-                        avail[slot.name]["available_compute_units"] -= slot.compute_units
+                    if spec.name in avail:
+                        avail[spec.name]["available_ram_mb"] -= spec.ram_mb
+                        avail[spec.name]["available_compute_units"] -= spec.compute_units
                 else:
                     # DeviceConstraint — find best device.
                     candidates = [
                         d for d in avail.values()
-                        if _matches(d, slot)
+                        if _matches(d, spec)
                     ]
                     if not candidates:
                         raise ValueError(
-                            f"no device satisfies constraint {slot!r} "
+                            f"no device satisfies constraint {spec!r} "
                             f"for reservation {label!r}"
                         )
                     # Consolidate: prefer device with least available RAM
@@ -102,11 +98,11 @@ class ConsolidateSolver:
                     best = min(candidates, key=lambda d: d["available_ram_mb"])
                     allocations.append(DeviceAllocation(
                         name=best["name"],
-                        ram_mb=slot.ram_mb,
-                        compute_units=slot.compute_units,
+                        ram_mb=spec.ram_mb,
+                        compute_units=spec.compute_units,
                     ))
-                    avail[best["name"]]["available_ram_mb"] -= slot.ram_mb
-                    avail[best["name"]]["available_compute_units"] -= slot.compute_units
+                    avail[best["name"]]["available_ram_mb"] -= spec.ram_mb
+                    avail[best["name"]]["available_compute_units"] -= spec.compute_units
 
             res_requests.append(ReservationRequest(
                 label=label,
@@ -118,7 +114,7 @@ class ConsolidateSolver:
 
 class SpreadSolver:
     """
-    Distribute slots across as many physical devices as possible.
+    Distribute allocations across as many physical devices as possible.
 
     For each constraint, pick the eligible device that has the most remaining
     available RAM (i.e. most empty). This maximises parallel throughput.
@@ -129,43 +125,37 @@ class SpreadSolver:
         reservations: list["ReservationSpec"],
         devices: list[DeviceStatusDict],
     ) -> ReserveRequest:
-        from .client import DeviceConstraint, ExplicitSlot
-
         avail: dict[str, dict] = {d["name"]: dict(d) for d in devices}
 
         res_requests: list[ReservationRequest] = []
 
-        for label, slots in reservations:
+        for label, specs in reservations:
             allocations: list[DeviceAllocation] = []
-            for slot in slots:
-                if isinstance(slot, ExplicitSlot):
-                    allocations.append(DeviceAllocation(
-                        name=slot.name,
-                        ram_mb=slot.ram_mb,
-                        compute_units=slot.compute_units,
-                    ))
-                    if slot.name in avail:
-                        avail[slot.name]["available_ram_mb"] -= slot.ram_mb
-                        avail[slot.name]["available_compute_units"] -= slot.compute_units
+            for spec in specs:
+                if isinstance(spec, DeviceAllocation):
+                    allocations.append(spec)
+                    if spec.name in avail:
+                        avail[spec.name]["available_ram_mb"] -= spec.ram_mb
+                        avail[spec.name]["available_compute_units"] -= spec.compute_units
                 else:
                     candidates = [
                         d for d in avail.values()
-                        if _matches(d, slot)
+                        if _matches(d, spec)
                     ]
                     if not candidates:
                         raise ValueError(
-                            f"no device satisfies constraint {slot!r} "
+                            f"no device satisfies constraint {spec!r} "
                             f"for reservation {label!r}"
                         )
                     # Spread: prefer device with most available RAM (most empty).
                     best = max(candidates, key=lambda d: d["available_ram_mb"])
                     allocations.append(DeviceAllocation(
                         name=best["name"],
-                        ram_mb=slot.ram_mb,
-                        compute_units=slot.compute_units,
+                        ram_mb=spec.ram_mb,
+                        compute_units=spec.compute_units,
                     ))
-                    avail[best["name"]]["available_ram_mb"] -= slot.ram_mb
-                    avail[best["name"]]["available_compute_units"] -= slot.compute_units
+                    avail[best["name"]]["available_ram_mb"] -= spec.ram_mb
+                    avail[best["name"]]["available_compute_units"] -= spec.compute_units
 
             res_requests.append(ReservationRequest(
                 label=label,

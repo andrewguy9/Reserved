@@ -397,8 +397,8 @@ class TestGrantAtomic:
         assert avail_map["cuda:GPU-00000000-0000-0000-0000-000000000000"].available_ram_mb == 24576 - 8192
         assert avail_map["cuda:GPU-00000000-0000-0000-0000-000000000001"].available_ram_mb == 24576 - 4096
 
-    def test_multi_slot_single_reservation(self):
-        """Single reservation with multiple slots on different devices."""
+    def test_multi_allocation_single_reservation(self):
+        """Single reservation with multiple allocations on different devices."""
         ledger = make_ledger()
         req = ReserveRequest(reservations=(
             ReservationRequest(

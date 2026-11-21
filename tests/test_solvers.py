@@ -4,7 +4,8 @@ Tests for reserved/sdk/solvers.py — constraint solvers.
 
 import pytest
 
-from reserved.sdk.client import DeviceConstraint, ExplicitSlot
+from reserved.core import DeviceAllocation
+from reserved.sdk.client import DeviceConstraint
 from reserved.sdk.solvers import ConsolidateSolver, SpreadSolver
 
 
@@ -81,8 +82,8 @@ class TestConsolidateSolver:
         assert chosen in ("cuda:GPU-00000000-0000-0000-0000-000000000000", "cuda:GPU-00000000-0000-0000-0000-000000000002")
         assert chosen != "cuda:GPU-00000000-0000-0000-0000-000000000001"
 
-    def test_explicit_slot_passthrough(self):
-        req = self._solve([("job", [ExplicitSlot("cuda:GPU-00000000-0000-0000-0000-000000000002", ram_mb=4096)])])
+    def test_explicit_allocation_passthrough(self):
+        req = self._solve([("job", [DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000002", ram_mb=4096)])])
         assert req.reservations[0].allocations[0].name == "cuda:GPU-00000000-0000-0000-0000-000000000002"
         assert req.reservations[0].allocations[0].ram_mb == 4096
 
@@ -90,7 +91,7 @@ class TestConsolidateSolver:
         with pytest.raises(ValueError, match="no device"):
             self._solve([("job", [DeviceConstraint("cuda", model="nonexistent")])])
 
-    def test_two_slots_consolidated(self):
+    def test_two_allocations_consolidated(self):
         """Two constraints should both be assigned, consuming simulated capacity."""
         req = self._solve([("job", [
             DeviceConstraint("cuda", ram_mb=4096),
@@ -134,9 +135,9 @@ class TestSpreadSolver:
         # cuda:GPU-00000000-0000-0000-0000-000000000002 has 49152 available — most empty.
         assert req.reservations[0].allocations[0].name == "cuda:GPU-00000000-0000-0000-0000-000000000002"
 
-    def test_spread_distributes_two_slots(self):
+    def test_spread_distributes_two_allocations(self):
         """SpreadSolver should distribute onto different devices when capacity forces it."""
-        # Use a tight device list so the second slot is forced onto a different device.
+        # Use a tight device list so the second allocation is forced onto a different device.
         devices_tight = [
             {
                 "name": "cuda:GPU-00000000-0000-0000-0000-000000000000", "type": "cuda", "model": None,
@@ -149,7 +150,7 @@ class TestSpreadSolver:
                 "compute_units": 100, "available_compute_units": 100,
             },
         ]
-        # Request two slots, each needing 6000 MB — only one fits per device.
+        # Request two allocations, each needing 6000 MB — only one fits per device.
         req = SpreadSolver().solve([("job", [
             DeviceConstraint("cuda", ram_mb=6000),
             DeviceConstraint("cuda", ram_mb=6000),
@@ -162,8 +163,8 @@ class TestSpreadSolver:
         names = [s.name for s in allocations]
         assert names[0] != names[1]
 
-    def test_explicit_slot_passthrough(self):
-        req = self._solve([("job", [ExplicitSlot("cuda:GPU-00000000-0000-0000-0000-000000000001", ram_mb=2048)])])
+    def test_explicit_allocation_passthrough(self):
+        req = self._solve([("job", [DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000001", ram_mb=2048)])])
         assert req.reservations[0].allocations[0].name == "cuda:GPU-00000000-0000-0000-0000-000000000001"
 
     def test_no_matching_device_raises(self):

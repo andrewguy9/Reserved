@@ -72,7 +72,7 @@ reserve cuda-demo type=cuda,ram=1024 -- python examples/cuda_job.py
 
 With `cuda_dual.json` loaded, name each physical card to claim 1024 MB on each
 in one reservation. Both claims are granted together or the job does not start.
-Two `type=cuda` slots can share a card under the default solver. Naming the cards
+Two `type=cuda` constraints can share a card under the default solver. Naming the cards
 guarantees distinct grants.
 
 ```bash
@@ -86,7 +86,7 @@ operations finish. Run `reserve-status` again to see the capacity return.
 
 To check allocation without PyTorch, run either command with `reserve-status`
 after `--` in place of `python examples/cuda_job.py`. It prints the reservation
-and its slots while the lease is held.
+and its allocations while the lease is held.
 
 ## Apple Silicon Metal
 

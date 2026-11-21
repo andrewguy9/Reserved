@@ -161,10 +161,10 @@ reserve-status
 `reserve` wraps any command under a reservation. Use it for programs that do not know about the SDK. It acquires a single reservation, sets environment variables for the child process, then replaces itself with the target command.
 
 ```
-reserve LABEL [SLOT ...] [--solver consolidate|spread] [--socket PATH] -- CMD [ARGS...]
+reserve LABEL [DEVICE ...] [--solver consolidate|spread] [--socket PATH] -- CMD [ARGS...]
 ```
 
-Each `SLOT` is a comma-separated set of constraints:
+Each `DEVICE` is one allocation in the reservation, written as comma-separated fields:
 
 | Field | Effect |
 | --- | --- |
@@ -223,7 +223,7 @@ PyTorch uses logical `cuda:0` in that process.
 Use the SDK when an application can participate in reservations directly. The SDK talks to the daemon, holds the lease fd for the lifetime of each `Reservation`, and exposes granted devices to application code.
 
 ```python
-from reserved.sdk.client import Reservation, Request, DeviceConstraint, ExplicitSlot
+from reserved.sdk import Reservation, Request, DeviceConstraint, DeviceAllocation
 from reserved.sdk.errors import ReservationError, DaemonNotRunningError, ReservationExpiredError
 ```
 
@@ -246,8 +246,8 @@ with Reservation("infer", DeviceConstraint("cuda", ram_mb=30720)) as r:
     ...
 
 # Two distinct CUDA devices, released together
-with Reservation("distributed", ExplicitSlot("cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", ram_mb=1024),
-                 ExplicitSlot("cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781", ram_mb=1024)) as r:
+with Reservation("distributed", DeviceAllocation("cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", ram_mb=1024),
+                 DeviceAllocation("cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781", ram_mb=1024)) as r:
     devices = r.torch_devices()
     run_distributed(devices)
 ```
@@ -282,7 +282,7 @@ that capacity before releasing it; Reserved does not free GPU memory itself.
 
 ```python
 # Pin directly to a physical device
-with Reservation("infer", ExplicitSlot("cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", ram_mb=8192)) as r:
+with Reservation("infer", DeviceAllocation("cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782", ram_mb=8192)) as r:
     model.to(r.devices[0].torch_device())
     run_model()
 ```
@@ -311,7 +311,7 @@ gets a copy, so capacity returns when the last copy closes.
 The adopted reservation exposes `reservation_id` from `RESERVED_ID` and
 physical grants from `RESERVED_GRANTED_ALLOCATIONS`. Update the `reserve` launcher
 and the worker SDK together. Adoption requires this grant metadata and
-accepts an empty array for a reservation with zero slots.
+accepts an empty array for a reservation with zero allocations.
 See the [getting-started walkthrough](GETTING_STARTED.md#adopt-the-lease-in-a-python-worker).
 
 ### PyTorch device selection

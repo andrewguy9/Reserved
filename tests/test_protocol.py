@@ -74,14 +74,14 @@ class TestReserveRequestWire:
         obj = json.loads(data)
         assert obj["reservations"][0]["label"] == "train"
 
-    def test_serialize_slot_fields(self):
+    def test_serialize_allocation_fields(self):
         req = self._make_request()
         data = reserve_request_to_wire(req)
         obj = json.loads(data)
-        slot = obj["reservations"][0]["allocations"][0]
-        assert slot["name"] == "cuda:GPU-00000000-0000-0000-0000-000000000000"
-        assert slot["ram_mb"] == 8192
-        assert slot["compute_units"] == 50
+        allocation = obj["reservations"][0]["allocations"][0]
+        assert allocation["name"] == "cuda:GPU-00000000-0000-0000-0000-000000000000"
+        assert allocation["ram_mb"] == 8192
+        assert allocation["compute_units"] == 50
 
     def test_deserialize_reserve_request(self):
         wire = b'{"op":"reserve","reservations":[{"label":"lora","allocations":[{"name":"cuda:GPU-00000000-0000-0000-0000-000000000001","ram_mb":2048,"compute_units":0}]}]}\n'

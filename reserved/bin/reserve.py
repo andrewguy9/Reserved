@@ -17,7 +17,6 @@ from reserved.core import DeviceAllocation, ReservationRequest, ReserveRequest, 
 from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import (
     DeviceConstraint,
-    ExplicitSlot,
     _get_socket_override,
     _query_status,
     _send_reserve,
@@ -29,17 +28,19 @@ from reserved.sdk.solvers import ConsolidateSolver, SpreadSolver
 _USAGE = f"""Acquire a reservation and exec a command under it.
 
 Usage:
-    reserve [options] LABEL [SLOT...]
+    reserve [options] LABEL [DEVICE...]
     reserve (-h | --help)
 
-Append -- CMD [ARGS...] after the options, label, and slots.
+Append -- CMD [ARGS...] after the options, label, and devices.
 
 Options:
     -h --help        Show this help.
     --solver SOLVER  Select consolidate or spread [default: consolidate].
     --socket PATH    {SOCKET_PATH_HELP}
 
-SLOT format: comma-separated key=value pairs.
+DEVICE format: comma-separated key=value pairs. Each DEVICE is one
+allocation in the reservation: a constraint the solver places, or an explicit
+device when name= is given.
     type=TYPE        Device type (cuda, metal, cpu)
     model=MODEL      Device model label
     ram=MB           RAM in MB (alias for ram_mb)
@@ -54,26 +55,30 @@ Examples:
 """
 
 
-def parse_slot(spec: str) -> DeviceConstraint | ExplicitSlot:
-    """Parse a SLOT string like 'type=cuda,ram=8192' into a slot descriptor."""
+def parse_device_spec(spec: str) -> DeviceConstraint | DeviceAllocation:
+    """Parse a DEVICE string like 'type=cuda,ram=8192'.
+
+    Returns a DeviceAllocation when the spec names a device, otherwise a
+    DeviceConstraint for the solver.
+    """
     fields: dict[str, str] = {}
     for part in spec.split(","):
         part = part.strip()
         if not part:
             continue
         if "=" not in part:
-            raise SystemExit(f"error: invalid slot field {part!r} (expected key=value)")
+            raise SystemExit(f"error: invalid device field {part!r} (expected key=value)")
         key, _, value = part.partition("=")
         fields[key.strip()] = value.strip()
 
     physical_name = fields.get("name")
     if physical_name is not None:
-        # Explicit slot.
+        # Explicit allocation.
         ram_mb = int(fields.get("ram", fields.get("ram_mb", 0)))
         compute_units = int(fields.get("compute", fields.get("compute_units", 0)))
-        return ExplicitSlot(name=physical_name, ram_mb=ram_mb, compute_units=compute_units)
+        return DeviceAllocation(name=physical_name, ram_mb=ram_mb, compute_units=compute_units)
     else:
-        # Constraint slot.
+        # Constraint for the solver.
         return DeviceConstraint(
             type=fields.get("type"),
             model=fields.get("model"),
@@ -84,26 +89,20 @@ def parse_slot(spec: str) -> DeviceConstraint | ExplicitSlot:
 
 def build_reserve_request(
     label: str,
-    slots: list[DeviceConstraint | ExplicitSlot],
+    specs: list[DeviceConstraint | DeviceAllocation],
     solver: ConsolidateSolver | SpreadSolver,
     devices: list[dict] | None = None,
 ) -> ReserveRequest:
-    """Build the explicit daemon request for already-parsed CLI slots."""
-    all_explicit = all(isinstance(s, ExplicitSlot) for s in slots)
-
-    if all_explicit or not slots:
-        allocations = [
-            DeviceAllocation(name=s.name, ram_mb=s.ram_mb, compute_units=s.compute_units)
-            for s in slots
-            if isinstance(s, ExplicitSlot)
-        ]
+    """Build the explicit daemon request for already-parsed CLI device specs."""
+    if all(isinstance(s, DeviceAllocation) for s in specs):
+        # Every spec is explicit (or there are none): no solver step.
         return ReserveRequest(reservations=(
-            ReservationRequest(label=label, allocations=tuple(allocations)),
+            ReservationRequest(label=label, allocations=tuple(specs)),
         ))
 
     if devices is None:
-        raise ValueError("device status is required for constraint slots")
-    return solver.solve([(label, slots)], devices)
+        raise ValueError("device status is required for device constraints")
+    return solver.solve([(label, specs)], devices)
 
 
 def build_exec_env(
@@ -163,11 +162,11 @@ def main(argv: list[str] | None = None) -> None:
     socket_path = _get_socket_override(args["--socket"])
     solver = SpreadSolver() if solver_name == "spread" else ConsolidateSolver()
 
-    slots = [parse_slot(spec) for spec in args["SLOT"]]
+    specs = [parse_device_spec(text) for text in args["DEVICE"]]
     label = args["LABEL"]
 
-    if all(isinstance(s, ExplicitSlot) for s in slots) or not slots:
-        req = build_reserve_request(label, slots, solver)
+    if all(isinstance(s, DeviceAllocation) for s in specs):
+        req = build_reserve_request(label, specs, solver)
     else:
         # Run solver.
         try:
@@ -177,7 +176,7 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(2)
 
         try:
-            req = build_reserve_request(label, slots, solver, status["devices"])
+            req = build_reserve_request(label, specs, solver, status["devices"])
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)

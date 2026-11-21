@@ -19,10 +19,10 @@
 
 ### Explicit language (daemon protocol)
 
-The daemon speaks only in explicit terms. Every slot names a physical device and states exactly how much capacity to claim:
+The daemon speaks only in explicit terms. Every allocation names a physical device and states exactly how much capacity to claim:
 
 ```
-slot: name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  ram_mb=8192  compute_units=50
+allocation: name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780  ram_mb=8192  compute_units=50
 ```
 
 No wildcards. No type matching. The daemon checks whether the named device has sufficient capacity and subtracts if so.
@@ -32,8 +32,8 @@ No wildcards. No type matching. The daemon checks whether the named device has s
 Users typically don't know or care which physical device they get — they just need a CUDA device with enough VRAM:
 
 ```
-slot: type=cuda  ram_mb=8192
-slot: type=cuda  model=rtx3090
+constraint: type=cuda  ram_mb=8192
+constraint: type=cuda  model=rtx3090
 ```
 
 A **constraint solver** resolves constraints against current device status and produces an explicit request before submitting to the daemon.
@@ -42,8 +42,8 @@ A **constraint solver** resolves constraints against current device status and p
 
 | Solver | Behaviour | Default |
 | --- | --- | --- |
-| `ConsolidateSolver` | Packs slots onto as few devices as possible | Yes |
-| `SpreadSolver` | Distributes slots across as many devices as possible | No |
+| `ConsolidateSolver` | Packs allocations onto as few devices as possible | Yes |
+| `SpreadSolver` | Distributes allocations across as many devices as possible | No |
 
 Any caller can bypass solvers by submitting an explicit request directly to the daemon — this is what sophisticated orchestrators do after running their own placement algorithm.
 
@@ -62,14 +62,14 @@ The daemon is unaware of solvers. New solvers can be added without any daemon ch
 ```
 Request
 └── Reservation  (one per independent lifetime)
-    └── Slot     (one per physical device)
+    └── Allocation  (one per physical device)
         └── Resource  (ram_mb, compute_units claimed)
 ```
 
 - **Request** — atomic unit. All reservations granted together or all rejected. One wire message.
 - **Reservation** — named grouping with its own lease fd. Granted atomically, released independently. The caller declares boundaries based on intended lifetime.
-- **Slot** — one physical device. All slots in a reservation are released when its lease fd closes.
-- **Resource** — capacity claimed on the slot's device. Multiple slots can share a physical device as long as combined capacity fits.
+- **Allocation** — one physical device and the capacity claimed on it. All allocations in a reservation are released when its lease fd closes. The same `DeviceAllocation` record is what the client requests, the daemon grants, the ledger holds, and status reports.
+- **Resource** — capacity claimed on the allocation's device. Multiple allocations can share a physical device as long as combined capacity fits.
 
 ---
 
@@ -187,7 +187,7 @@ See [Getting started](GETTING_STARTED.md#hold-capacity-for-a-model-worker).
 
 ## CUDA device indexing
 
-Physical device names identify hardware in the config, CLI `name=` slots,
+Physical device names identify hardware in the config, CLI `name=` specs,
 solver, ledger, protocol, and SDK grant metadata. A CUDA name is
 `cuda:GPU-<uuid>`. The UUID is the one `nvidia-smi -L` prints, so it names one
 specific board regardless of the driver's enumeration order, and
@@ -197,7 +197,7 @@ claims that card. The CLI exports the name in `RESERVED_DEVICE` and
 `RESERVED_DEVICES`, passes the granted allocations in
 `RESERVED_GRANTED_ALLOCATIONS` for SDK adoption, and sets
 `CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` so the worker sees only
-the granted GPU. Multiple CUDA slots contribute distinct UUIDs in first-grant
+the granted GPU. Multiple CUDA allocations contribute distinct UUIDs in first-grant
 order.
 
 `GrantedDevice.torch_device()` is the conversion boundary. It enumerates the
@@ -207,7 +207,7 @@ and returns the index whose UUID matches the grant. The worker above gets
 `CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456781,GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782`
 gets `torch.device("cuda:1")` for the same grant, and a process with no mask
 gets the card's position in torch's full enumeration. `Reservation.torch_devices()`
-applies the conversion in grant order. Multiple slots on the same GPU resolve
+applies the conversion in grant order. Multiple allocations on the same GPU resolve
 to the same logical index.
 
 The SDK never reads or writes `CUDA_VISIBLE_DEVICES`; it only reports the mask
@@ -235,7 +235,7 @@ def release(ledger, reservation_id) -> Ledger: ...
 def status(ledger) -> StatusResult: ...
 ```
 
-`grant()` does a two-pass atomic check-and-subtract. If any slot fails, the original ledger is returned unchanged.
+`grant()` does a two-pass atomic check-and-subtract. If any allocation fails, the original ledger is returned unchanged.
 
 Fully testable as plain function calls — no daemon, no sockets, no hardware required.
 
@@ -264,7 +264,7 @@ reserved/
   paths.py       # socket discovery shared by daemon, SDK, and CLIs
   protocol.py    # single-line JSON serialization (explicit types only)
   sdk/
-    client.py    # Reservation, Request, DeviceConstraint, ExplicitSlot
+    client.py    # Reservation, Request, DeviceConstraint, GrantedDevice
     solvers.py   # ConsolidateSolver, SpreadSolver
     errors.py    # ReservationError, DaemonNotRunningError, ReservationExpiredError
   bin/
@@ -274,7 +274,7 @@ reserved/
 
 ### Language boundaries
 
-The constraint language never crosses a process boundary. `DeviceConstraint`, `ExplicitSlot`, and solver classes are in-process Python objects only — never serialized. Only explicit requests hit the wire. `protocol.py` never touches constraint types.
+The constraint language never crosses a process boundary. `DeviceConstraint` and the solver classes are in-process Python objects only — never serialized. Only explicit requests of `DeviceAllocation` records hit the wire. `protocol.py` never touches constraint types.
 
 ---
 

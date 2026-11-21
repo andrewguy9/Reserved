@@ -1,9 +1,9 @@
 """
 protocol.py — Wire serialization for the reserved daemon protocol.
 
-Handles only explicit requests and responses. Constraint types (DeviceConstraint,
-ExplicitSlot from the SDK) never appear here. Device names on the wire
-identify physical devices.
+Handles only explicit requests and responses. The SDK's DeviceConstraint never
+appears here: by the time a request reaches the wire every device is a
+DeviceAllocation. Device names on the wire identify physical devices.
 
 Wire format: single-line JSON terminated by '\\n' over a Unix domain socket.
 """

@@ -6,33 +6,32 @@ import json
 
 import pytest
 
-from reserved.bin.reserve import build_exec_env, build_reserve_request, main, parse_slot
+from reserved.bin.reserve import build_exec_env, build_reserve_request, main, parse_device_spec
 from reserved.core import DeviceAllocation, ReservationRequest, ReserveRequest
-from reserved.sdk.client import DeviceConstraint, ExplicitSlot
+from reserved.sdk.client import DeviceConstraint
 from reserved.sdk.solvers import ConsolidateSolver
 
 
-def test_parse_slot_ram_and_compute_aliases_are_equivalent():
-    short = parse_slot("type=cuda,model=a6000,ram=8192,compute=25")
-    long = parse_slot("type=cuda,model=a6000,ram_mb=8192,compute_units=25")
+def test_parse_device_spec_ram_and_compute_aliases_are_equivalent():
+    short = parse_device_spec("type=cuda,model=a6000,ram=8192,compute=25")
+    long = parse_device_spec("type=cuda,model=a6000,ram_mb=8192,compute_units=25")
 
     assert isinstance(short, DeviceConstraint)
     assert isinstance(long, DeviceConstraint)
     assert short == long
 
 
-def test_parse_slot_name_selects_explicit_slot():
-    slot = parse_slot("name=cuda:GPU-00000000-0000-0000-0000-000000000002,type=cuda,ram=4096,compute=50")
+def test_parse_device_spec_name_selects_explicit_allocation():
+    spec = parse_device_spec("name=cuda:GPU-00000000-0000-0000-0000-000000000002,type=cuda,ram=4096,compute=50")
 
-    assert isinstance(slot, ExplicitSlot)
-    assert slot.name == "cuda:GPU-00000000-0000-0000-0000-000000000002"
-    assert slot.ram_mb == 4096
-    assert slot.compute_units == 50
+    assert spec == DeviceAllocation(
+        name="cuda:GPU-00000000-0000-0000-0000-000000000002", ram_mb=4096, compute_units=50,
+    )
 
 
-def test_parse_slot_rejects_fields_without_key_value_shape():
+def test_parse_device_spec_rejects_fields_without_key_value_shape():
     with pytest.raises(SystemExit):
-        parse_slot("type=cuda,ram")
+        parse_device_spec("type=cuda,ram")
 
 
 @pytest.mark.parametrize("argv, message", [
@@ -46,13 +45,13 @@ def test_main_rejects_invalid_invocations(argv, message, capsys):
     assert message in capsys.readouterr().err
 
 
-def test_build_reserve_request_for_explicit_slots_preserves_order_and_capacity():
-    slots = [
-        ExplicitSlot("cuda:GPU-00000000-0000-0000-0000-000000000001", ram_mb=4096, compute_units=25),
-        ExplicitSlot("cpu", ram_mb=1024),
+def test_build_reserve_request_for_explicit_allocations_passes_them_through():
+    specs = [
+        DeviceAllocation("cuda:GPU-00000000-0000-0000-0000-000000000001", ram_mb=4096, compute_units=25),
+        DeviceAllocation("cpu", ram_mb=1024),
     ]
 
-    req = build_reserve_request("job", slots, ConsolidateSolver())
+    req = build_reserve_request("job", specs, ConsolidateSolver())
 
     assert req.reservations == (
         ReservationRequest(label="job", allocations=(
@@ -62,7 +61,7 @@ def test_build_reserve_request_for_explicit_slots_preserves_order_and_capacity()
     )
 
 
-def test_build_reserve_request_without_slots_is_valid_marker_reservation():
+def test_build_reserve_request_without_devices_is_valid_marker_reservation():
     req = build_reserve_request("marker", [], ConsolidateSolver())
 
     assert req.reservations == (
@@ -85,11 +84,11 @@ def test_build_reserve_request_delegates_constraints_to_solver():
 
     solver = RecordingSolver()
     devices = [{"name": "cuda:GPU-00000000-0000-0000-0000-000000000000"}]
-    slots = [DeviceConstraint("cuda", ram_mb=2048)]
+    specs = [DeviceConstraint("cuda", ram_mb=2048)]
 
-    req = build_reserve_request("job", slots, solver, devices)
+    req = build_reserve_request("job", specs, solver, devices)
 
-    assert solver.calls == [([("job", slots)], devices)]
+    assert solver.calls == [([("job", specs)], devices)]
     assert req.reservations[0].allocations[0] == DeviceAllocation(name="cuda:GPU-00000000-0000-0000-0000-000000000000", ram_mb=2048)
 
 
