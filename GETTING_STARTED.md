@@ -202,7 +202,9 @@ with sdk.Reservation("model-worker", sdk.DeviceConstraint("cuda", ram_mb=8192)) 
 The orchestrator keeps its own lease copy, so a worker that crashes does not
 return capacity until the orchestrator releases or relaunches. Install the same
 Reserved version in the orchestrator's and each worker's environment, since the
-worker's SDK reads the variables the orchestrator's SDK writes.
+worker's SDK reads the variables the orchestrator's SDK writes. See
+[Work with several virtual environments](#work-with-several-virtual-environments)
+for installation and activation details.
 
 ### CUDA device indices
 
@@ -235,6 +237,107 @@ Resolving a CUDA grant initializes CUDA, so call `torch_devices()` in the
 process that will use the GPU.
 See [CUDA device indexing](ARCHITECTURE.md#cuda-device-indexing).
 
+## Work with several virtual environments
+
+Model families often need dependency sets that cannot share one environment.
+A common layout is an orchestrator in one virtual environment that starts each
+model worker from the worker's own environment. The handoff is a file
+descriptor and a few environment variables, so it does not depend on which
+interpreter runs the worker. This section covers the three things that do
+matter: installing the SDK in each environment, choosing the worker's
+interpreter, and the activation state the worker inherits.
+
+### Install Reserved in every environment
+
+A worker must have Reserved installed in its own environment: it imports
+`reserved.sdk` from there to adopt and check its lease. The SDK uses only the
+standard library; `docopt-ng` is needed only by the command-line tools. A
+worker that only adopts a lease can install without dependencies:
+
+```bash
+/absolute/path/to/model-env/bin/python -m pip install --no-deps \
+  git+https://github.com/andrewguy9/Reserved.git
+```
+
+Install the same version everywhere. Adoption reads the variables the
+launching SDK writes, so a worker on a different version fails at startup with
+`ReservationError` naming `RESERVED_GRANTED_ALLOCATIONS` or `RESERVED_FD`.
+Reinstall the orchestrator and every worker environment from the same commit.
+Before version 1.0, the handoff variables and the daemon's socket messages may
+change between releases without compatibility with earlier versions.
+
+Do not start workers with a Reserved source checkout as their working
+directory. `python -m` puts the working directory first on the import path,
+so the worker would import the checkout instead of its own installed copy.
+Pass `cwd=` to `popen()` when the orchestrator itself runs from the checkout.
+
+### Start the worker with its own interpreter
+
+The interpreter decides which site-packages the worker sees. Give `popen()`
+the absolute path to the worker environment's Python:
+
+```python
+from reserved import sdk
+
+venv = "/absolute/path/to/model-env"
+
+with sdk.Reservation("model-worker", sdk.DeviceConstraint("cuda", ram_mb=8192)) as r:
+    worker = r.popen([f"{venv}/bin/python", "-m", "model_worker"])
+    worker.wait()
+```
+
+Inside the worker, `sys.prefix` is the worker environment and
+`adopt_inherited_lease()` works exactly as it does under `reserve`.
+
+### Pass activation state, not just the interpreter
+
+`popen()` copies the orchestrator's environment to the worker. If the
+orchestrator runs inside an activated virtual environment, the worker inherits
+`VIRTUAL_ENV` and a `PATH` whose first entry is the orchestrator's `bin`. The
+worker's interpreter and imports are still correct, but anything the worker
+runs by bare name, such as `python`, a console script, or a helper tool
+installed in its environment, resolves into the orchestrator's environment
+instead.
+
+Activation is two variables, so the orchestrator can set them itself and skip
+the shell:
+
+```python
+import os
+from reserved import sdk
+
+
+def activated(venv: str) -> dict[str, str]:
+    env = {**os.environ, "VIRTUAL_ENV": venv, "PATH": f"{venv}/bin:{os.environ['PATH']}"}
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    return env
+
+
+venv = "/absolute/path/to/model-env"
+
+with sdk.Reservation("model-worker", sdk.DeviceConstraint("cuda", ram_mb=8192)) as r:
+    worker = r.popen(["python", "-m", "model_worker"], env=activated(venv))
+    worker.wait()
+```
+
+With `PATH` set this way the bare `python` is the worker environment's
+interpreter. Dropping `PYTHONPATH` and `PYTHONHOME` keeps the orchestrator's
+import configuration out of the worker.
+
+A shell that sources the environment's `activate` script gives the same
+result. The lease descriptor passes through the shell to the worker:
+
+```python
+worker = r.popen(["bash", "-c", f"source '{venv}/bin/activate' && exec python -m model_worker"])
+```
+
+Use `exec` so the shell is replaced by the worker and signals and exit codes
+reach the worker directly. Without `exec` the shell stays as the worker's
+parent; the handoff still works, because shells do not close inherited
+descriptors, but the orchestrator then supervises the shell rather than the
+worker.
+
 ## Handle failures
 
 | Observation | Application action |
@@ -244,6 +347,7 @@ See [CUDA device indexing](ARCHITECTURE.md#cuda-device-indexing).
 | `ReservationExpiredError` from `check()` | Stop using the invalid lease and recover the work through the application. |
 | `ReservationError` from `torch_devices()` for a hidden CUDA grant or invalid mask | Check the physical grant name and the process's CUDA visibility. |
 | Capacity remains claimed after a worker exits | Check whether a child or another process still holds a lease copy. |
+| `ReservationError` naming `RESERVED_GRANTED_ALLOCATIONS` or `RESERVED_FD` when a worker adopts | The launching and worker environments run different Reserved versions; reinstall both from the same commit. |
 
 `DaemonNotRunningError` and `ReservationExpiredError` inherit from
 `ReservationError`; catch them first if handling the cases separately. Transport
