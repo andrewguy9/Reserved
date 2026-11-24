@@ -183,6 +183,14 @@ forks still holds a descriptor copy. To hand off a lease across `exec`, do so
 before adopting it in the process that will manage its lifetime.
 See [Getting started](GETTING_STARTED.md#hold-capacity-for-a-model-worker).
 
+A Python parent that owns a reservation hands it to a child the same way with
+`Reservation.popen(args)`. It adds the lease descriptor to `pass_fds` and
+builds the child's environment with the SDK's lease-environment helper, which
+the `reserve` CLI also calls, so both launchers write the same variables.
+`Reservation.lease_fd` and `child_env()` expose the two pieces for other
+launchers. The parent keeps its copy of the descriptor; the lease ends when
+the parent and every child copy have closed.
+
 ---
 
 ## CUDA device indexing

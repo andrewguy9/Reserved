@@ -120,6 +120,17 @@ batch checkpoint. It releases its copy when it leaves the `with` block. A
 missing or invalid inherited descriptor raises `ReservationError` before the
 worker reaches its first batch.
 
+A Python process can perform the same handoff itself. The
+[launch example](examples/launch_worker.py) acquires a reservation with the SDK
+and starts the same worker under it with `Reservation.popen()`:
+
+```bash
+python examples/launch_worker.py
+```
+
+The parent prints when it starts and when the worker exits; the worker prints
+the same reservation ID at each checkpoint.
+
 Stop the demo daemon with Ctrl-C in terminal one when finished. All commands in
 the rest of this guide assume a daemon configured for your real hardware; see
 the [resource config reference](README.md#resource-config).
@@ -131,6 +142,7 @@ the [resource config reference](README.md#resource-config).
 | Python worker that can check its lease between batches | `Reservation` context manager | The worker |
 | Existing command that needs a reservation and CUDA masking | `reserve LABEL DEVICE -- CMD` | The command and any inherited lease copies |
 | Python worker launched by `reserve` that checks or releases its lease | `adopt_inherited_lease()` | The worker and any inherited lease copies |
+| Python orchestrator that starts workers in other environments | `Reservation.popen(...)` | The orchestrator and each worker's lease copy |
 | Several reservations that must be granted together | `Request(...).acquire()` | The caller, with explicit `release()` cleanup |
 | Coordinator inspecting capacity | `reserve-status --json` | Status is a snapshot and holds no capacity |
 
@@ -176,6 +188,21 @@ reserve model-worker type=cuda,ram=8192 -- /absolute/path/to/model-env/bin/pytho
 8192 MB budget is illustrative and must be replaced with your measured needs.
 The CLI preserves the lease across exec. Inside `model_worker`, adopt the
 inherited lease and call `check()` at checkpoints to detect daemon shutdown.
+
+An orchestrating Python process can perform the same handoff without the CLI:
+
+```python
+from reserved import sdk
+
+with sdk.Reservation("model-worker", sdk.DeviceConstraint("cuda", ram_mb=8192)) as r:
+    worker = r.popen(["/absolute/path/to/model-env/bin/python", "-m", "model_worker"])
+    worker.wait()
+```
+
+The orchestrator keeps its own lease copy, so a worker that crashes does not
+return capacity until the orchestrator releases or relaunches. Install the same
+Reserved version in the orchestrator's and each worker's environment, since the
+worker's SDK reads the variables the orchestrator's SDK writes.
 
 ### CUDA device indices
 

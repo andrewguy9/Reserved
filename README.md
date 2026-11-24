@@ -207,6 +207,9 @@ configs and a PyTorch worker for one or two cards.
 | `RESERVED_ID` | Reservation ID |
 | `RESERVED_FD` | File descriptor number of the lease fd |
 
+`Reservation.popen()` in the SDK sets the same variables for a worker it
+starts; see [Launch a worker under a reservation](#launch-a-worker-under-a-reservation).
+
 For `reserve infer name=cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782 -- python infer.py`, the daemon
 grants that card. The worker sees `RESERVED_DEVICE` and `RESERVED_DEVICES` set
 to `cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782` and `CUDA_VISIBLE_DEVICES=GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456782`.
@@ -312,6 +315,37 @@ physical grants from `RESERVED_GRANTED_ALLOCATIONS`. Update the `reserve` launch
 and the worker SDK together. Adoption requires this grant metadata and
 accepts an empty array for a reservation with zero allocations.
 See the [getting-started walkthrough](GETTING_STARTED.md#adopt-the-lease-in-a-python-worker).
+
+### Launch a worker under a reservation
+
+An orchestrating process can acquire capacity with the SDK and start a worker
+that holds a copy of the lease, the same handoff `reserve` performs. `popen()`
+wraps `subprocess.Popen`: it passes the lease descriptor to the child and sets
+the [launcher's environment variables](#command-line-wrapper-reserve) so the
+worker can call `adopt_inherited_lease()`. Other descriptors stay closed unless
+listed in `pass_fds`. Remaining keyword arguments go to `subprocess.Popen`.
+
+```python
+from reserved.sdk import Reservation, DeviceConstraint
+
+with Reservation("tts", DeviceConstraint("cuda", ram_mb=8192)) as r:
+    worker = r.popen(["/path/to/tts-env/bin/python", "-m", "tts_worker"])
+    worker.wait()
+```
+
+The parent keeps its own copy of the lease. The daemon reclaims capacity after
+the last copy closes, so the reservation above ends once the worker has exited
+and the `with` block closes the parent's copy. Keep the parent's copy open to
+relaunch a crashed worker under the same grant, or release it to let the
+worker's lifetime end the reservation. A worker that exits does not return
+capacity while the parent still holds the lease.
+
+`child_env(base_env)` returns the variables without starting a process, and
+`lease_fd` is the descriptor to pass, for other launchers such as
+`asyncio.create_subprocess_exec(..., pass_fds=[r.lease_fd], env=r.child_env())`.
+Both raise `ReservationExpiredError` once the reservation is released. Install
+the same version of Reserved in the parent's and each worker's environment,
+since adoption reads the variables this version writes.
 
 ### PyTorch device selection
 
