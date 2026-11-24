@@ -243,16 +243,18 @@ Model families often need dependency sets that cannot share one environment.
 A common layout is an orchestrator in one virtual environment that starts each
 model worker from the worker's own environment. The handoff is a file
 descriptor and a few environment variables, so it does not depend on which
-interpreter runs the worker. This section covers the three things that do
-matter: installing the SDK in each environment, choosing the worker's
-interpreter, and the activation state the worker inherits.
+interpreter runs the worker, or whether the worker is Python at all. This
+section covers the three things that do matter: installing the SDK in each
+environment that uses it, choosing the worker's interpreter, and the
+activation state the worker inherits.
 
-### Install Reserved in every environment
+### Install Reserved in every environment that uses the SDK
 
-A worker must have Reserved installed in its own environment: it imports
-`reserved.sdk` from there to adopt and check its lease. The SDK uses only the
-standard library; `docopt-ng` is needed only by the command-line tools. A
-worker that only adopts a lease can install without dependencies:
+A Python worker that adopts its lease with `adopt_inherited_lease()` imports
+`reserved.sdk` from its own environment, so Reserved must be installed there
+as well as in the orchestrator's. The SDK uses only the standard library;
+`docopt-ng` is needed only by the command-line tools. A worker that only
+adopts a lease can install without dependencies:
 
 ```bash
 /absolute/path/to/model-env/bin/python -m pip install --no-deps \
@@ -337,6 +339,17 @@ reach the worker directly. Without `exec` the shell stays as the worker's
 parent; the handoff still works, because shells do not close inherited
 descriptors, but the orchestrator then supervises the shell rather than the
 worker.
+
+### Workers that are not Python
+
+A worker in another language needs no Reserved install. It holds the
+descriptor named by `RESERVED_FD` and keeps the lease by staying alive; the
+daemon reclaims the capacity when the last copy of the descriptor closes. The
+descriptor becomes readable with end-of-file when the daemon restarts, so the
+worker can poll it for the same signal `check()` provides. The granted devices
+are in `RESERVED_DEVICES` and `RESERVED_GRANTED_ALLOCATIONS`, and CUDA
+visibility is already masked. See the
+[environment variable table](README.md#command-line-wrapper-reserve).
 
 ## Handle failures
 
