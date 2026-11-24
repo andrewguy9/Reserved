@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 
@@ -13,11 +12,13 @@ if _here not in sys.path:
     sys.path.insert(0, _here)
 
 from reserved.cli import parse_options, usage_error
-from reserved.core import ReserveRequest, cuda_uuid
+from reserved.core import ReserveRequest
 from reserved.paths import SOCKET_PATH_HELP
 from reserved.sdk.client import (
     DeviceConstraint,
     _get_socket_override,
+    _granted_allocation,
+    _lease_environment,
     _query_status,
     _send_reserve,
 )
@@ -90,33 +91,8 @@ def build_exec_env(
     lease_fd: int | None,
 ) -> dict[str, str]:
     """Pass granted allocations and CUDA visibility to the child process."""
-    physical_names = [a["name"] for a in granted_allocations]
-    cuda_uuids: list[str] = []
-    for name in physical_names:
-        if name.partition(":")[0] == "cuda":
-            token = cuda_uuid(name)
-            if token not in cuda_uuids:
-                cuda_uuids.append(token)
-
-    first_accel = next(
-        (name for name in physical_names if not name.startswith("cpu")),
-        physical_names[0] if physical_names else "",
-    )
-
-    env = base_env.copy()
-    if cuda_uuids:
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_uuids)
-    env["RESERVED_DEVICE"] = first_accel
-    env["RESERVED_DEVICES"] = ",".join(physical_names)
-    # Preserve allocation boundaries even when a configured name contains a comma.
-    env["RESERVED_GRANTED_ALLOCATIONS"] = json.dumps(granted_allocations, separators=(",", ":"))
-    env["RESERVED_ID"] = reservation_id
-    if lease_fd is not None:
-        env["RESERVED_FD"] = str(lease_fd)
-    else:
-        # Drop any stale lease number from the environment passed to exec.
-        env.pop("RESERVED_FD", None)
-    return env
+    allocations = [_granted_allocation(a) for a in granted_allocations]
+    return _lease_environment(base_env, allocations, reservation_id, lease_fd)
 
 
 def main(argv: list[str] | None = None) -> None:

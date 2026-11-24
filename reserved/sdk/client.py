@@ -5,6 +5,9 @@ Public API:
   Reservation(label, *constraints, solver=ConsolidateSolver(), socket_path=None)
   adopt_inherited_lease()
   Request(*reservations, socket_path=None)
+  Reservation.popen(args, **kwargs)   # child holding a copy of the lease
+  Reservation.child_env(base_env)     # launcher variables for such a child
+  Reservation.lease_fd                # descriptor for a custom launcher
   DeviceConstraint(type, *, name=None, ram_mb=0, compute_units=0)
   torch_device(allocation)   # PyTorch device for one granted DeviceAllocation
   torch_cuda_uuid(properties)  # GPU-<uuid> of a torch CUDA device
@@ -17,8 +20,10 @@ import json
 import os
 import select
 import socket
+import subprocess
 import threading
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -390,6 +395,61 @@ class Reservation:
         """Return process-local PyTorch devices, one per granted allocation, in grant order."""
         return [torch_device(a) for a in self.devices]
 
+    # ------------------------------------------------------------------
+    # Handing the lease to a child process
+    # ------------------------------------------------------------------
+
+    @property
+    def lease_fd(self) -> int:
+        """The lease descriptor this process holds for the reservation.
+
+        A launcher that cannot use ``popen()`` passes it in ``pass_fds`` and
+        sets ``child_env()`` so the child can adopt the lease. Raises
+        ReservationExpiredError before acquisition and after release.
+        """
+        if self._lease_sock is None:
+            raise ReservationExpiredError("reservation not acquired or already released")
+        return self._lease_sock.fileno()
+
+    def child_env(self, base_env: Mapping[str, str] | None = None) -> dict[str, str]:
+        """Environment for a child that receives a copy of this lease.
+
+        Returns a copy of ``base_env`` (``os.environ`` by default) with the
+        variables the ``reserve`` launcher sets: ``RESERVED_FD``,
+        ``RESERVED_ID``, ``RESERVED_GRANTED_ALLOCATIONS``, ``RESERVED_DEVICE``,
+        ``RESERVED_DEVICES``, and ``CUDA_VISIBLE_DEVICES`` for CUDA grants.
+        The child holds the lease only if it also inherits ``lease_fd``.
+        """
+        fd = self.lease_fd
+        if self.reservation_id is None:
+            raise ReservationError("reservation has no ID to pass to a child")
+        source = os.environ if base_env is None else base_env
+        return _lease_environment(source, self.devices, self.reservation_id, fd)
+
+    def popen(
+        self,
+        args: Any,
+        *,
+        env: Mapping[str, str] | None = None,
+        pass_fds: Any = (),
+        **kwargs: Any,
+    ) -> subprocess.Popen:
+        """Start a child process that holds a copy of this lease.
+
+        Calls ``subprocess.Popen(args, **kwargs)`` with the lease descriptor
+        added to ``pass_fds`` and ``child_env(env)`` as the environment, so the
+        child can call ``adopt_inherited_lease()``. Other descriptors are not
+        inherited unless listed in ``pass_fds``.
+
+        This process keeps its own copy. The daemon reclaims capacity only
+        after both copies close, so ``release()`` here when the worker is done,
+        or keep the lease to relaunch the worker under the same grant.
+        """
+        fd = self.lease_fd
+        return subprocess.Popen(
+            args, env=self.child_env(env), pass_fds=(*pass_fds, fd), **kwargs,
+        )
+
     def __repr__(self) -> str:
         return (
             f"Reservation(label={self.label!r}, "
@@ -426,6 +486,49 @@ def _wrap_inherited_lease(fd_text: str) -> socket.socket:
         if not accepted:
             # A rejected descriptor still belongs to its original owner.
             lease_sock.detach()
+
+
+def _lease_environment(
+    base_env: Mapping[str, str],
+    allocations: list[DeviceAllocation],
+    reservation_id: str,
+    lease_fd: int | None,
+) -> dict[str, str]:
+    """Describe a granted reservation to a child process through its environment.
+
+    Shared by ``Reservation.child_env()`` and the ``reserve`` launcher so both
+    produce the variables ``adopt_inherited_lease()`` reads. ``base_env`` is
+    copied, not changed. Without a lease descriptor, any stale ``RESERVED_FD``
+    is dropped.
+    """
+    physical_names = [a.name for a in allocations]
+    cuda_uuids: list[str] = []
+    for name in physical_names:
+        if name.partition(":")[0] == "cuda":
+            token = cuda_uuid(name)
+            if token not in cuda_uuids:
+                cuda_uuids.append(token)
+
+    first_accel = next(
+        (name for name in physical_names if not name.startswith("cpu")),
+        physical_names[0] if physical_names else "",
+    )
+
+    env = dict(base_env)
+    if cuda_uuids:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_uuids)
+    env["RESERVED_DEVICE"] = first_accel
+    env["RESERVED_DEVICES"] = ",".join(physical_names)
+    # Preserve allocation boundaries even when a configured name contains a comma.
+    env["RESERVED_GRANTED_ALLOCATIONS"] = json.dumps(
+        [protocol._allocation_to_wire(a) for a in allocations], separators=(",", ":"),
+    )
+    env["RESERVED_ID"] = reservation_id
+    if lease_fd is not None:
+        env["RESERVED_FD"] = str(lease_fd)
+    else:
+        env.pop("RESERVED_FD", None)
+    return env
 
 
 def _granted_allocation(record: Any) -> DeviceAllocation:

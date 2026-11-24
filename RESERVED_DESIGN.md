@@ -501,14 +501,16 @@ with Reservation("worker", DeviceConstraint("cuda", ram_mb=16384)) as r:
 # both parent and child have exited — reservation released
 ```
 
-To pass a reservation to an exec'd child from Python:
+To start a worker that holds a copy of the reservation from Python:
 
 ```python
 with Reservation("worker", DeviceConstraint("cuda")) as r:
-    os.set_inheritable(r._lease_sock.fileno(), True)
-    os.execvp("worker", ["worker"])
-    # exec replaces this process; reservation held by worker until it exits
+    worker = r.popen(["/path/to/worker-env/bin/python", "-m", "worker"])
+    worker.wait()
+    # the parent still holds its copy; the lease ends when the block exits
 ```
+
+`popen()` is `subprocess.Popen` with the lease fd added to `pass_fds` and the same environment variables `reserve` sets, so the worker can call `adopt_inherited_lease()`. `lease_fd` and `child_env()` expose those two pieces for other launchers, including a plain exec: make `lease_fd` inheritable and `execvpe` the worker with `child_env()`. The lease socket attribute itself is private.
 
 ### Finding reservation owners
 
@@ -588,7 +590,7 @@ CMD runs directly — no wrapper process sitting around it.
 | RESERVED_ID | Reservation ID (opaque string) |
 | RESERVED_FD | File descriptor number of the lease socketpair end for this reservation, e.g. `3` |
 
-`RESERVED_FD` is one fd regardless of how many allocations were granted — allocations share a reservation and a single lease fd. It is not needed by typical programs (they simply inherit the fd and hold the lease by staying alive). It is useful for wrapper scripts that need to explicitly close the fd early, debugging tools that want to identify the lease fd, or fd-preserving child launchers that need to pass it along.
+`RESERVED_FD` is one fd regardless of how many allocations were granted — allocations share a reservation and a single lease fd. It is not needed by typical programs (they simply inherit the fd and hold the lease by staying alive). It is useful for wrapper scripts that need to explicitly close the fd early, debugging tools that want to identify the lease fd, or fd-preserving child launchers that need to pass it along. The SDK's `Reservation.popen()` and `child_env()` produce the same variables from the same implementation, so a worker adopts a lease identically whether `reserve` or a Python parent launched it.
 
 `CUDA_VISIBLE_DEVICES` is an NVIDIA-defined environment variable that the CUDA runtime, PyTorch, and other frameworks read at startup to determine which physical GPUs are visible to the process. By setting it before exec, `reserve` hooks into this existing operator infrastructure — the exec'd process sees only the devices it was granted, with no awareness of `reserved` or the full physical device layout.
 

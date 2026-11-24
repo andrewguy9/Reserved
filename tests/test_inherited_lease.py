@@ -338,10 +338,154 @@ def _run_launched_worker(mode):
         ordinary.check()
 
 
+def _wait_for_no_reservations(socket_path):
+    deadline = time.monotonic() + 5
+    while client._query_status(socket_path)["reservations"]:
+        assert time.monotonic() < deadline, "daemon did not reclaim the lease"
+        time.sleep(0.01)
+
+
+def _active_ids(socket_path):
+    return [entry["id"] for entry in client._query_status(socket_path)["reservations"]]
+
+
+def _start_sdk_child(reservation, unrelated_fd, env):
+    child = reservation.popen(
+        [sys.executable, "-m", "tests.test_inherited_lease", "sdk-child", str(unrelated_fd)],
+        env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    if child.stdout.readline() != "adopted\n":
+        pytest.fail(child.communicate(timeout=10)[1])
+    return child
+
+
+def _finish_sdk_child(child):
+    _, stderr = child.communicate(input="exit\n", timeout=10)
+    assert child.returncode == 0, stderr
+
+
+@pytest.mark.parametrize("parent_releases_first", [True, False])
+def test_sdk_popen_child_holds_a_lease_copy(daemon_env, parent_releases_first):
+    socket_path = daemon_env["RESERVED_SOCKET"]
+    unrelated, _peer = socket.socketpair()
+    with unrelated, _peer:
+        lease = sdk.Reservation(
+            "parent", sdk.DeviceConstraint(name="cpu", ram_mb=1024), socket_path=socket_path,
+        )
+        with lease:
+            child = _start_sdk_child(lease, unrelated.fileno(), daemon_env)
+            with child:
+                if parent_releases_first:
+                    lease.release()
+                    # The child's copy keeps the reservation alive.
+                    assert _active_ids(socket_path) == [lease.reservation_id]
+                    _finish_sdk_child(child)
+                    _wait_for_no_reservations(socket_path)
+                else:
+                    _finish_sdk_child(child)
+                    # The parent's copy keeps the reservation alive after the worker exits.
+                    assert _active_ids(socket_path) == [lease.reservation_id]
+                    lease.check()
+            # The parent still owns its descriptor in both orders.
+            assert unrelated.fileno() >= 0
+        _wait_for_no_reservations(socket_path)
+
+
+def test_sdk_popen_failure_leaves_the_lease_held(daemon_env):
+    socket_path = daemon_env["RESERVED_SOCKET"]
+    with sdk.Reservation(
+        "parent", sdk.DeviceConstraint(name="cpu", ram_mb=1024), socket_path=socket_path,
+    ) as lease:
+        with pytest.raises(FileNotFoundError):
+            lease.popen(["/nonexistent/reserved-worker"])
+        lease.check()
+        assert _active_ids(socket_path) == [lease.reservation_id]
+        os.fstat(lease.lease_fd)
+    _wait_for_no_reservations(socket_path)
+
+
+def test_request_launches_each_reservation_with_only_its_own_lease(daemon_env):
+    socket_path = daemon_env["RESERVED_SOCKET"]
+    first = sdk.Reservation("first", sdk.DeviceConstraint(name=CUDA2, ram_mb=512))
+    second = sdk.Reservation("second", sdk.DeviceConstraint(name=CUDA5, ram_mb=512))
+    sdk.Request(first, second, socket_path=socket_path).acquire()
+    try:
+        reports = {}
+        for lease, other in ((first, second), (second, first)):
+            result = lease.popen(
+                [sys.executable, "-m", "tests.test_inherited_lease", "sdk-child-env",
+                 str(other.lease_fd)],
+                env={**daemon_env, "MARK": lease.label},
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            stdout, stderr = result.communicate(timeout=10)
+            assert result.returncode == 0, stderr
+            reports[lease.label] = json.loads(stdout)
+
+        assert reports["first"] == {
+            "id": first.reservation_id, "fd": first.lease_fd, "stream": True,
+            "cuda": UUID2, "devices": CUDA2, "mark": "first", "other_open": False,
+        }
+        assert reports["second"] == {
+            "id": second.reservation_id, "fd": second.lease_fd, "stream": True,
+            "cuda": UUID5, "devices": CUDA5, "mark": "second", "other_open": False,
+        }
+        assert sorted(_active_ids(socket_path)) == sorted(
+            [first.reservation_id, second.reservation_id],
+        )
+    finally:
+        first.release()
+        second.release()
+    _wait_for_no_reservations(socket_path)
+
+
+def _run_sdk_child(unrelated_fd_text):
+    fd = int(os.environ["RESERVED_FD"])
+    assert os.get_inheritable(fd)  # pass_fds clears close-on-exec in the child.
+    with pytest.raises(OSError):
+        os.fstat(int(unrelated_fd_text))  # only the lease descriptor was passed
+    assert os.environ["RESERVED_DEVICE"] == "cpu"
+    assert os.environ["RESERVED_DEVICES"] == "cpu"
+    assert json.loads(os.environ["RESERVED_GRANTED_ALLOCATIONS"]) == [
+        {"name": "cpu", "ram_mb": 1024, "compute_units": 0},
+    ]
+    with sdk.adopt_inherited_lease() as lease:
+        assert lease.reservation_id == os.environ["RESERVED_ID"]
+        assert lease.devices == [sdk.DeviceAllocation("cpu", ram_mb=1024)]
+        lease.check()
+        assert _active_ids(os.environ["RESERVED_SOCKET"]) == [lease.reservation_id]
+        print("adopted", flush=True)
+        assert sys.stdin.readline() == "exit\n"
+        lease.check()
+
+
+def _print_sdk_child_env(other_fd_text):
+    fd = int(os.environ["RESERVED_FD"])
+    try:
+        os.fstat(int(other_fd_text))
+        other_open = True
+    except OSError:
+        other_open = False
+    with socket.socket(fileno=fd) as lease_sock:
+        print(json.dumps({
+            "id": os.environ["RESERVED_ID"],
+            "fd": fd,
+            "stream": lease_sock.type == socket.SOCK_STREAM,
+            "cuda": os.environ["CUDA_VISIBLE_DEVICES"],
+            "devices": os.environ["RESERVED_DEVICES"],
+            "mark": os.environ["MARK"],
+            "other_open": other_open,
+        }))
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "single-cuda":
         _run_single_cuda_worker()
     elif sys.argv[1] == "repeated-cuda":
         _run_repeated_cuda_worker()
+    elif sys.argv[1] == "sdk-child":
+        _run_sdk_child(sys.argv[2])
+    elif sys.argv[1] == "sdk-child-env":
+        _print_sdk_child_env(sys.argv[2])
     else:
         _run_launched_worker(sys.argv[1])

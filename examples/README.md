@@ -11,7 +11,8 @@ budget and show status while the reservation is held. It needs no PyTorch or GPU
 
 The same walkthrough shows how to [wrap an existing command](../GETTING_STARTED.md#wrap-a-command-that-knows-nothing-about-reserved)
 and how to [adopt the lease in a Python worker](../GETTING_STARTED.md#adopt-the-lease-in-a-python-worker)
-with `inherited_lease_job.py`.
+with `inherited_lease_job.py`. `launch_worker.py` starts that same worker from
+Python with `Reservation.popen()` instead of the `reserve` command.
 
 ## NVIDIA CUDA
 
