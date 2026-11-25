@@ -287,7 +287,7 @@ def worker_env(venv: str) -> dict[str, str]:
 venv = "/absolute/path/to/model-env"
 
 with sdk.Reservation("model-worker", sdk.DeviceConstraint("cuda", ram_mb=8192)) as r:
-    worker = r.popen([f"{venv}/bin/python", "-m", "model_worker"], env=worker_env(venv))
+    worker = r.popen([f"{venv}/bin/python", "-P", "-m", "model_worker"], env=worker_env(venv))
     worker.wait()
 ```
 
@@ -300,16 +300,21 @@ it would put the orchestrator's trees ahead of the worker's installed packages.
 Do not launch through a shell that sources `activate`; shell startup files can
 change the environment in ways the orchestrator cannot see.
 
-Also pass `cwd=` to `popen()` when the orchestrator runs from a source
-checkout. With `-m`, the working directory is searched before everything else,
-so a worker started in a checkout imports that checkout, whatever was
-installed or named in `PYTHONPATH`.
+The `-P` flag keeps the worker's working directory off its import path. Without
+it, `python -m` puts the current directory first, ahead of `PYTHONPATH` and of
+every installed package, and a worker started in a source checkout imports
+that checkout. In a printed `sys.path` that entry appears as `''`, which is
+easy to read past. `PYTHONSAFEPATH=1` in the environment does the same as
+`-P`. Passing `cwd=` to `popen()` to start the worker in a neutral directory
+also works, and is the option when the worker needs its working directory on
+the path.
 
-Before relying on a launch, ask the interpreter what it will import, with the
-working directory and environment the worker will have:
+Before relying on a launch, ask the interpreter what it will import, invoked
+the way the worker is invoked: same interpreter, same flags, same working
+directory, same environment:
 
 ```bash
-/absolute/path/to/model-env/bin/python -c "import model_worker; print(model_worker.__file__)"
+/absolute/path/to/model-env/bin/python -P -c "import model_worker; print(model_worker.__file__)"
 ```
 
 The printed path is the tree the worker will run. If it is not the one you
@@ -320,7 +325,7 @@ interpreter is named after `--`. The command passes its own environment through
 unchanged, so clear `PYTHONPATH` first:
 
 ```bash
-env -u PYTHONPATH reserve model-worker type=cuda,ram=8192 -- /absolute/path/to/model-env/bin/python -m model_worker
+env -u PYTHONPATH reserve model-worker type=cuda,ram=8192 -- /absolute/path/to/model-env/bin/python -P -m model_worker
 ```
 
 ### 3. Adopt the lease in the worker as usual
@@ -335,8 +340,8 @@ startup and `check()` between units of work, exactly as under `reserve`.
 | Worker raises `ReservationError` naming `RESERVED_GRANTED_ALLOCATIONS` or `RESERVED_FD` at startup | The two environments have different Reserved versions | Reinstall both from the same commit (step 1) |
 | `ModuleNotFoundError: reserved` in the worker | Reserved is not installed in the worker environment | Install it there (step 1) |
 | A tool the worker runs by name comes from the orchestrator's environment | The worker inherited the orchestrator's `PATH` and `VIRTUAL_ENV` | Pass `env=worker_env(venv)` (step 2) |
-| The worker imports a different tree than `PYTHONPATH` names, with no error | The working directory is searched before `PYTHONPATH`, or `PYTHONPATH` names a directory that does not contain the package and the search falls through to the copy installed in the interpreter's environment, editable or not | Do not select a tree with `PYTHONPATH`; run the interpreter of the environment that has the tree installed, and pass `cwd=` (step 2) |
-| The worker imports Reserved from the source checkout | The worker's working directory is the checkout | Pass `cwd=` to `popen()` (step 2) |
+| A worker started with `-m` or `-c` imports from the orchestrator's working directory, with no error, and `sys.path` shows `''` first | The working directory is searched before `PYTHONPATH` and before installed packages | Run the worker with `-P`, or pass `cwd=` to a neutral directory (step 2) |
+| `PYTHONPATH` names a tree and the worker imports a different one, with no error | The named directory does not contain the package, so the search falls through to the installed copy | Do not select a tree with `PYTHONPATH`; run the interpreter of the environment that has the tree installed (step 2) |
 
 ### Workers that are not Python
 
