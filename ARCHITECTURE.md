@@ -187,6 +187,10 @@ A Python parent that owns a reservation hands it to a child the same way with
 `Reservation.popen(args)`. It adds the lease descriptor to `pass_fds` and
 builds the child's environment with the SDK's lease-environment helper, which
 the `reserve` CLI also calls, so both launchers write the same variables.
+`Reservation.popen_python(env_dir, module, *args)` is the same launch for a
+Python worker in another environment: that environment's `bin/python` with
+`-P -m`, its `bin` first on `PATH`, `VIRTUAL_ENV` set, and `PYTHONPATH` and
+`PYTHONHOME` dropped, so the worker imports only from its own environment.
 `Reservation.lease_fd` and `child_env()` expose the two pieces for other
 launchers. The parent keeps its copy of the descriptor; the lease ends when
 the parent and every child copy have closed.

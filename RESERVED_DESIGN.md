@@ -510,7 +510,7 @@ with Reservation("worker", DeviceConstraint("cuda")) as r:
     # the parent still holds its copy; the lease ends when the block exits
 ```
 
-`popen()` is `subprocess.Popen` with the lease fd added to `pass_fds` and the same environment variables `reserve` sets, so the worker can call `adopt_inherited_lease()`. `lease_fd` and `child_env()` expose those two pieces for other launchers, including a plain exec: make `lease_fd` inheritable and `execvpe` the worker with `child_env()`. The lease socket attribute itself is private.
+`popen()` is `subprocess.Popen` with the lease fd added to `pass_fds` and the same environment variables `reserve` sets, so the worker can call `adopt_inherited_lease()`. `popen_python(env_dir, module, *args)` builds on it for a Python worker in another environment: it runs that environment's `bin/python -P -m module`, with the environment's `bin` first on `PATH`, `VIRTUAL_ENV` set, and `PYTHONPATH` and `PYTHONHOME` dropped, so the worker's imports come only from its own environment. `lease_fd` and `child_env()` expose those two pieces for other launchers, including a plain exec: make `lease_fd` inheritable and `execvpe` the worker with `child_env()`. The lease socket attribute itself is private.
 
 ### Finding reservation owners
 

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import venv
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -436,6 +437,72 @@ def test_request_launches_each_reservation_with_only_its_own_lease(daemon_env):
     finally:
         first.release()
         second.release()
+    _wait_for_no_reservations(socket_path)
+
+
+@pytest.fixture(scope="module")
+def worker_environment(tmp_path_factory):
+    """A real virtual environment with this repository installed through a .pth file."""
+    env_dir = tmp_path_factory.mktemp("worker-env")
+    venv.create(env_dir, with_pip=False, symlinks=True)
+    site_packages = env_dir / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    (site_packages / "reserved-under-test.pth").write_text(str(Path(__file__).resolve().parent.parent) + "\n")
+    return str(env_dir)
+
+
+def test_popen_python_runs_the_module_from_its_own_environment(daemon_env, worker_environment, tmp_path):
+    socket_path = daemon_env["RESERVED_SOCKET"]
+    shadow_dir = tmp_path / "launch-dir"
+    shadow_dir.mkdir()
+    (shadow_dir / "shadowed_module.py").write_text("SHADOW = True\n")
+    base = {**daemon_env, "PYTHONPATH": "/nowhere", "PYTHONHOME": "/nowhere-home", "MARK": "orchestrator"}
+
+    with sdk.Reservation(
+        "parent", sdk.DeviceConstraint(name="cpu", ram_mb=1024), socket_path=socket_path,
+    ) as lease:
+        child = lease.popen_python(
+            worker_environment, "tests.python_env_worker", "two words",
+            env=base, cwd=str(shadow_dir), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        stdout, stderr = child.communicate(timeout=20)
+        assert child.returncode == 0, stderr
+        report = json.loads(stdout)
+
+        assert os.path.realpath(report["prefix"]) == os.path.realpath(worker_environment)
+        assert report["reserved_file"].startswith(str(Path(__file__).resolve().parent.parent))
+        assert report["safe_path"] is True
+        assert report["path0"] not in ("", str(shadow_dir))
+        assert report["shadow_imported"] is False
+        assert report["virtual_env"] == worker_environment
+        assert report["path_head"] == f"{worker_environment}/bin"
+        assert report["pythonpath"] is None
+        assert report["pythonhome"] is None
+        assert report["mark"] == "orchestrator"
+        assert report["argv"] == ["two words"]
+        assert report["id"] == lease.reservation_id
+        assert report["active"] == [lease.reservation_id]
+
+        # Control: the same interpreter without -P imports the launch directory's module.
+        control = lease.popen(
+            [f"{worker_environment}/bin/python", "-m", "tests.python_env_worker"],
+            env={**daemon_env, "MARK": "control"}, cwd=str(shadow_dir),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        stdout, stderr = control.communicate(timeout=20)
+        assert control.returncode == 0, stderr
+        assert json.loads(stdout)["shadow_imported"] is True
+    _wait_for_no_reservations(socket_path)
+
+
+def test_popen_python_rejects_a_missing_interpreter_and_keeps_the_lease(daemon_env, tmp_path):
+    socket_path = daemon_env["RESERVED_SOCKET"]
+    with sdk.Reservation(
+        "parent", sdk.DeviceConstraint(name="cpu", ram_mb=1024), socket_path=socket_path,
+    ) as lease:
+        with pytest.raises(FileNotFoundError, match="bin/python"):
+            lease.popen_python(tmp_path / "not-an-env", "model_worker")
+        lease.check()
+        assert _active_ids(socket_path) == [lease.reservation_id]
     _wait_for_no_reservations(socket_path)
 
 

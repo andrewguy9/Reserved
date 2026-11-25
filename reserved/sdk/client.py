@@ -6,6 +6,7 @@ Public API:
   adopt_inherited_lease()
   Request(*reservations, socket_path=None)
   Reservation.popen(args, **kwargs)   # child holding a copy of the lease
+  Reservation.popen_python(env_dir, module, *args, **kwargs)  # python -P -m from another environment
   Reservation.child_env(base_env)     # launcher variables for such a child
   Reservation.lease_fd                # descriptor for a custom launcher
   DeviceConstraint(type, *, name=None, ram_mb=0, compute_units=0)
@@ -450,6 +451,38 @@ class Reservation:
             args, env=self.child_env(env), pass_fds=(*pass_fds, fd), **kwargs,
         )
 
+    def popen_python(
+        self,
+        env_dir: str | os.PathLike[str],
+        module: str,
+        *args: str,
+        env: Mapping[str, str] | None = None,
+        **kwargs: Any,
+    ) -> subprocess.Popen:
+        """Start ``python -P -m module args...`` from the Python environment at ``env_dir``.
+
+        ``env_dir`` is a directory with a ``bin/python``: a venv, uv, or conda
+        environment. The worker runs that interpreter with ``-P``, so its
+        working directory never joins its import path, and with the
+        environment's ``bin`` first on ``PATH`` and ``VIRTUAL_ENV`` set, as
+        ``activate`` would set them. ``PYTHONPATH`` and ``PYTHONHOME`` are
+        dropped from the base environment: they describe this process, not the
+        worker. Everything else works as in ``popen()``.
+
+        Raises FileNotFoundError, before starting anything, if ``bin/python``
+        is not an executable file.
+        """
+        self.lease_fd
+        env_dir = os.path.abspath(os.fspath(env_dir))
+        interpreter = os.path.join(env_dir, "bin", "python")
+        if not (os.path.isfile(interpreter) and os.access(interpreter, os.X_OK)):
+            raise FileNotFoundError(f"no executable interpreter at {interpreter!r}")
+        base = os.environ if env is None else env
+        return self.popen(
+            [interpreter, "-P", "-m", module, *args],
+            env=_python_environment(base, env_dir), **kwargs,
+        )
+
     def __repr__(self) -> str:
         return (
             f"Reservation(label={self.label!r}, "
@@ -486,6 +519,22 @@ def _wrap_inherited_lease(fd_text: str) -> socket.socket:
         if not accepted:
             # A rejected descriptor still belongs to its original owner.
             lease_sock.detach()
+
+
+def _python_environment(base_env: Mapping[str, str], env_dir: str) -> dict[str, str]:
+    """Environment for a Python worker running from the environment at ``env_dir``.
+
+    Sets what the environment's ``activate`` script sets, so programs the
+    worker runs by name resolve into its own environment, and drops the
+    launching process's import settings. ``base_env`` is copied, not changed.
+    """
+    env = dict(base_env)
+    bin_dir = os.path.join(env_dir, "bin")
+    env["VIRTUAL_ENV"] = env_dir
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}" if env.get("PATH") else bin_dir
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    return env
 
 
 def _lease_environment(

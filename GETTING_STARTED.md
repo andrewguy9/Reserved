@@ -142,7 +142,7 @@ the [resource config reference](README.md#resource-config).
 | Python worker that can check its lease between batches | `Reservation` context manager | The worker |
 | Existing command that needs a reservation and CUDA masking | `reserve LABEL DEVICE -- CMD` | The command and any inherited lease copies |
 | Python worker launched by `reserve` that checks or releases its lease | `adopt_inherited_lease()` | The worker and any inherited lease copies |
-| Python orchestrator that starts workers in other environments | `Reservation.popen(...)` | The orchestrator and each worker's lease copy |
+| Python orchestrator that starts workers in other environments | `Reservation.popen_python(...)` or `popen(...)` | The orchestrator and each worker's lease copy |
 | Several reservations that must be granted together | `Request(...).acquire()` | The caller, with explicit `release()` cleanup |
 | Coordinator inspecting capacity | `reserve-status --json` | Status is a snapshot and holds no capacity |
 
@@ -264,50 +264,54 @@ can install without dependencies:
   "git+https://github.com/andrewguy9/Reserved.git"
 ```
 
-### 2. Launch the worker with its own interpreter and environment
+### 2. Launch the worker with `popen_python()`
 
-Run the worker environment's Python by absolute path, and give the worker an
-environment that points at its own installation. `popen()` otherwise copies
-the orchestrator's environment, including the orchestrator's own activation
-state.
+Name the worker's environment and the module to run:
 
 ```python
-import os
 from reserved import sdk
 
-
-def worker_env(venv: str) -> dict[str, str]:
-    """Environment for a worker running from the virtual environment at venv."""
-    env = {**os.environ, "VIRTUAL_ENV": venv, "PATH": f"{venv}/bin:{os.environ['PATH']}"}
-    env.pop("PYTHONPATH", None)
-    env.pop("PYTHONHOME", None)
-    return env
-
-
-venv = "/absolute/path/to/model-env"
-
 with sdk.Reservation("model-worker", sdk.DeviceConstraint("cuda", ram_mb=8192)) as r:
-    worker = r.popen([f"{venv}/bin/python", "-P", "-m", "model_worker"], env=worker_env(venv))
+    worker = r.popen_python("/absolute/path/to/model-env", "model_worker")
     worker.wait()
 ```
 
-The interpreter path is the choice that matters. The two variables do what the
-environment's `activate` script does, so programs the worker runs by name, such
-as `python` or a tool installed in its environment, resolve into the worker's
-environment. `PYTHONPATH` is removed because it belongs to the orchestrator:
-it would put the orchestrator's trees ahead of the worker's installed packages.
-`PYTHONHOME` is removed because it would repoint the worker's standard library.
-Do not launch through a shell that sources `activate`; shell startup files can
-change the environment in ways the orchestrator cannot see.
+The first argument is a directory with a `bin/python`: a venv, uv, or conda
+environment. Further positional arguments become the module's command-line
+arguments, and keyword arguments go to `subprocess.Popen` as with `popen()`.
 
-The `-P` flag keeps the worker's working directory off its import path. Without
-it, `python -m` puts the current directory first, ahead of `PYTHONPATH` and of
-every installed package, and a worker started in a source checkout imports
-that checkout. In a printed `sys.path` that entry appears as `''`, which is
-easy to read past. `PYTHONSAFEPATH=1` in the environment does the same as
-`-P`. Passing `cwd=` to `popen()` to start the worker in a neutral directory
-also works, and is the option when the worker needs its working directory on
-the path.
+`popen_python()` runs the equivalent of this `popen()` call:
+
+```python
+import os
+
+venv = "/absolute/path/to/model-env"
+env = {**os.environ, "VIRTUAL_ENV": venv, "PATH": f"{venv}/bin:{os.environ['PATH']}"}
+env.pop("PYTHONPATH", None)
+env.pop("PYTHONHOME", None)
+worker = r.popen([f"{venv}/bin/python", "-P", "-m", "model_worker"], env=env)
+```
+
+Each piece closes one way a worker ends up running the wrong code:
+
+- **The interpreter path** decides which packages the worker imports.
+- **`-P`** keeps the worker's working directory off its import path. Without
+  it, `python -m` puts the current directory first, ahead of `PYTHONPATH` and
+  of every installed package, so a worker started in a source checkout imports
+  that checkout. In a printed `sys.path` that entry appears as `''`, which is
+  easy to read past.
+- **`VIRTUAL_ENV` and `PATH`** do what the environment's `activate` script
+  does, so programs the worker runs by name, such as `python` or a tool
+  installed in its environment, resolve into the worker's environment.
+- **Dropping `PYTHONPATH`** keeps the orchestrator's trees from being placed
+  ahead of the worker's installed packages. **Dropping `PYTHONHOME`** keeps the
+  worker's standard library its own.
+
+Use the `popen()` form directly when the worker needs something different, for
+example its working directory on the import path (omit `-P` and pass `cwd=` to
+a directory you control instead). Do not launch through a shell that sources
+`activate`; shell startup files can change the environment in ways the
+orchestrator cannot see.
 
 Before relying on a launch, ask the interpreter what it will import, invoked
 the way the worker is invoked: same interpreter, same flags, same working
@@ -339,9 +343,9 @@ startup and `check()` between units of work, exactly as under `reserve`.
 | --- | --- | --- |
 | Worker raises `ReservationError` naming `RESERVED_GRANTED_ALLOCATIONS` or `RESERVED_FD` at startup | The two environments have different Reserved versions | Reinstall both from the same commit (step 1) |
 | `ModuleNotFoundError: reserved` in the worker | Reserved is not installed in the worker environment | Install it there (step 1) |
-| A tool the worker runs by name comes from the orchestrator's environment | The worker inherited the orchestrator's `PATH` and `VIRTUAL_ENV` | Pass `env=worker_env(venv)` (step 2) |
-| A worker started with `-m` or `-c` imports from the orchestrator's working directory, with no error, and `sys.path` shows `''` first | The working directory is searched before `PYTHONPATH` and before installed packages | Run the worker with `-P`, or pass `cwd=` to a neutral directory (step 2) |
-| `PYTHONPATH` names a tree and the worker imports a different one, with no error | The named directory does not contain the package, so the search falls through to the installed copy | Do not select a tree with `PYTHONPATH`; run the interpreter of the environment that has the tree installed (step 2) |
+| A worker started with `-m` or `-c` imports from the orchestrator's working directory, with no error, and `sys.path` shows `''` first | The working directory is searched before `PYTHONPATH` and before installed packages | Use `popen_python()`, or run the worker with `-P` or `cwd=` set to a neutral directory (step 2) |
+| `PYTHONPATH` names a tree and the worker imports a different one, with no error | The named directory does not contain the package, so the search falls through to the installed copy | Do not select a tree with `PYTHONPATH`; install the tree in the environment whose interpreter runs the worker (step 2) |
+| A tool the worker runs by name comes from the orchestrator's environment | The worker inherited the orchestrator's `PATH` and `VIRTUAL_ENV` | Use `popen_python()`, or set those variables in the `env=` passed to `popen()` (step 2) |
 
 ### Workers that are not Python
 
