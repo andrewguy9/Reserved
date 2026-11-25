@@ -200,11 +200,9 @@ with sdk.Reservation("model-worker", sdk.DeviceConstraint("cuda", ram_mb=8192)) 
 ```
 
 The orchestrator keeps its own lease copy, so a worker that crashes does not
-return capacity until the orchestrator releases or relaunches. Install the same
-Reserved version in the orchestrator's and each worker's environment, since the
-worker's SDK reads the variables the orchestrator's SDK writes. See
-[Work with several virtual environments](#work-with-several-virtual-environments)
-for installation and activation details.
+return capacity until the orchestrator releases or relaunches. When the worker
+runs from another virtual environment, follow
+[Work with several virtual environments](#work-with-several-virtual-environments).
 
 ### CUDA device indices
 
@@ -243,7 +241,13 @@ Model families often need dependency sets that cannot share one environment.
 The usual layout is an orchestrator in one virtual environment that starts each
 model worker from the worker's own environment. The lease handoff is a file
 descriptor and a few environment variables, so it works across that boundary.
-Three steps make it reliable.
+
+The principle behind every step here: **the interpreter decides what a process
+imports.** A worker imports from the environment its interpreter belongs to.
+`PYTHONPATH` and the working directory are consulted only after that
+environment has had its say, and an editable install (`pip install -e`) can
+register an import finder that runs before either is searched. So choose the
+worker's packages by choosing its interpreter, never by adjusting its path.
 
 ### 1. Install the same version of Reserved in each environment
 
@@ -285,18 +289,36 @@ with sdk.Reservation("model-worker", sdk.DeviceConstraint("cuda", ram_mb=8192)) 
     worker.wait()
 ```
 
-The interpreter path decides which packages the worker imports. The two
-variables do what the environment's `activate` script does, so programs the
-worker runs by name, such as `python` or a tool installed in its environment,
-resolve into the worker's environment. Removing `PYTHONPATH` and `PYTHONHOME`
-keeps the orchestrator's import settings out of the worker. Do not launch
+The interpreter path is the choice that matters. The two variables do what the
+environment's `activate` script does, so programs the worker runs by name, such
+as `python` or a tool installed in its environment, resolve into the worker's
+environment. `PYTHONPATH` and `PYTHONHOME` are removed because they cannot be
+relied on to choose a tree: an installed package wins over them, so leaving
+them in misleads anyone reading the worker's environment. Do not launch
 through a shell that sources `activate`; shell startup files can change the
 environment in ways the orchestrator cannot see.
 
-If the orchestrator runs from a Reserved source checkout, also pass `cwd=` to
-`popen()` so the worker does not start in that directory. Python puts the
-working directory first on the import path, and the worker would import the
-checkout instead of its installed copy.
+If the orchestrator runs from a source checkout, also pass `cwd=` to `popen()`
+so the worker does not start in that directory. The working directory is on
+the import path and can shadow an installed copy that is not editable.
+
+Before relying on a launch, ask the interpreter what it will import, from the
+directory the worker will run in:
+
+```bash
+/absolute/path/to/model-env/bin/python -c "import model_worker; print(model_worker.__file__)"
+```
+
+The printed path is the tree the worker will run. If it is not the one you
+expect, fix the environment; no launch option will override it.
+
+The `reserve` command gives the same result when the worker environment's
+interpreter is named after `--`. The command passes its own environment through
+unchanged, so clear `PYTHONPATH` first:
+
+```bash
+env -u PYTHONPATH reserve model-worker type=cuda,ram=8192 -- /absolute/path/to/model-env/bin/python -m model_worker
+```
 
 ### 3. Adopt the lease in the worker as usual
 
@@ -310,6 +332,7 @@ startup and `check()` between units of work, exactly as under `reserve`.
 | Worker raises `ReservationError` naming `RESERVED_GRANTED_ALLOCATIONS` or `RESERVED_FD` at startup | The two environments have different Reserved versions | Reinstall both from the same commit (step 1) |
 | `ModuleNotFoundError: reserved` in the worker | Reserved is not installed in the worker environment | Install it there (step 1) |
 | A tool the worker runs by name comes from the orchestrator's environment | The worker inherited the orchestrator's `PATH` and `VIRTUAL_ENV` | Pass `env=worker_env(venv)` (step 2) |
+| The worker imports a different tree than `PYTHONPATH` or the launch directory names, with no error | The package is installed in the interpreter's environment, often editable, and that install is found first | Run the environment whose install you want; never select a tree with `PYTHONPATH` (step 2) |
 | The worker imports Reserved from the source checkout | The worker's working directory is the checkout | Pass `cwd=` to `popen()` (step 2) |
 
 ### Workers that are not Python

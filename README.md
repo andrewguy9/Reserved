@@ -343,10 +343,10 @@ capacity while the parent still holds the lease.
 `child_env(base_env)` returns the variables without starting a process, and
 `lease_fd` is the descriptor to pass, for other launchers such as
 `asyncio.create_subprocess_exec(..., pass_fds=[r.lease_fd], env=r.child_env())`.
-Both raise `ReservationExpiredError` once the reservation is released. Install
-the same version of Reserved in the parent's and each worker's environment,
-since adoption reads the variables this version writes. The getting-started
-guide covers [workers in other virtual environments](GETTING_STARTED.md#work-with-several-virtual-environments).
+Both raise `ReservationExpiredError` once the reservation is released. For a
+worker in another virtual environment, including the version the worker must
+install, see the getting-started guide's
+[Work with several virtual environments](GETTING_STARTED.md#work-with-several-virtual-environments).
 
 ### PyTorch device selection
 
