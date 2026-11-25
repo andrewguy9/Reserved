@@ -1,0 +1,334 @@
+# Resources and Metadata: Data Categories for Devices
+
+## Decision for review
+
+Reshape a device into three parts: a free-form `name`, a map of `resources`
+that obey semaphore rules, and a map of `metadata` scalars that describe the
+device and never change. Make the daemon's accounting generic over resource
+names, validate every value at the config and wire boundaries, and carry the
+device's metadata in each grant so a worker can build its CUDA mask from the
+grant alone.
+
+This is step one of three. Step two is a relational constraint language and
+solver in the SDK. Step three is the first service feature: a `service` kind
+of device with a `concurrency` resource that bounds parallel requests to an
+API or a local inference server. Step one is done right if step two can read
+everything it needs from status, and step three lands with no core, protocol,
+or solver change.
+
+## Why
+
+The motivating feature was an upper bound on parallel requests to a service.
+The lease model already fits: a service is a device, an in-flight call or a
+long-lived worker holds a lease on some of its capacity, and the daemon
+reclaims it when the lease fd closes. What did not fit was the data model.
+`ram_mb` and `compute_units` are named fields on `Device`, `DeviceAllocation`,
+`DeviceStatus`, `DeviceConstraint`, both solvers, both CLIs, the dashboard,
+and the wire. Adding `concurrency` as a third field would repeat that pattern
+for every future resource.
+
+The discussion also surfaced requests the current model cannot express:
+
+- two CUDA cards whose total memory is over 24 GB (a fact about the card, not
+  a claim on its free capacity);
+- two CUDA cards on the same NVLink network (a relation between devices);
+- a host power budget shared by every card (a resource that lives on a pool
+  rather than a device).
+
+All three resolve to facts about devices plus generic capacity plus solver
+policy. None needs the daemon to understand kinds beyond identity validation,
+and none needs hierarchy in the ledger.
+
+Parsing is also lenient today. `int(obj.get(key, 0))` accepts `-1`, `"5"`, and
+`2.7`, and a negative allocation would increase availability on grant.
+
+## The model
+
+A device is exactly `name`, `resources`, and `metadata`.
+
+**Resources** are non-negative integers. They are claimed on grant, returned
+on release, and checked atomically across a request. The daemon attaches no
+meaning to a resource name; `ram_mb`, `compute_units`, and `exclusive` are
+conventions between the operator and callers. `exclusive: 1` gives mutual
+exclusion among callers who claim it, with no new code.
+
+**Metadata** values are scalars only: string, integer, float, or boolean.
+`kind` is required on every device and is authoritative for mechanics: which
+environment variables to set, how torch finds the device. A device of kind
+`cuda` must carry `uuid: "GPU-<uuid>"`. Names are otherwise free, so the daemon
+validates the UUID in metadata, not in the name. Everything else in metadata
+is opaque to the daemon and exists for solvers: `fp16`, `nvfp4`, `nvlink`,
+`model`, `power_pool`.
+
+**Value rules** for a resource map, at config load, on the wire, and at the
+CLI: an omitted resource is 0, so `{}` is a valid allocation that claims
+nothing; a present value must be an integer that is not a boolean and is not
+negative; `null`, negative, string, and fractional values are invalid; a claim
+on a resource the device does not declare is rejected, because the daemon
+cannot account for it.
+
+The daemon stays explicit and best effort. A solver reads one snapshot and
+plans against it; the daemon re-checks on grant; a stale snapshot means a
+rejection and a re-plan. No queuing is added.
+
+## Shapes
+
+Config:
+
+```json
+{ "devices": [
+  { "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780",
+    "resources": { "ram_mb": 24576, "compute_units": 84 },
+    "metadata":  { "kind": "cuda",
+                   "uuid": "GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780",
+                   "model": "NVIDIA RTX A6000" } },
+  { "name": "cpu", "resources": { "ram_mb": 65536 }, "metadata": { "kind": "cpu" } }
+] }
+```
+
+Request allocation on the wire:
+
+```json
+{ "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", "resources": { "ram_mb": 8192 } }
+```
+
+`resources` may be omitted. Any other key is malformed.
+
+Granted allocation on the wire:
+
+```json
+{ "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780",
+  "resources": { "ram_mb": 8192 },
+  "metadata": { "kind": "cuda", "uuid": "GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", "model": "NVIDIA RTX A6000" } }
+```
+
+The grant is the request plus the device's immutable metadata. A worker
+launched by `reserve` learns its grant only from `RESERVED_GRANTED_ALLOCATIONS`,
+so the grant must carry what the worker needs to build `CUDA_VISIBLE_DEVICES`
+and find its torch device. The daemon is the authority for that, which is more
+robust than joining a grant against a status snapshot the launcher happened to
+fetch.
+
+Status device on the wire:
+
+```json
+{ "name": "cuda:GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780",
+  "capacity":  { "ram_mb": 24576, "compute_units": 84 },
+  "available": { "ram_mb": 16384, "compute_units": 84 },
+  "metadata":  { "kind": "cuda", "uuid": "GPU-0a1b2c3d-4e5f-6789-abcd-ef0123456780", "model": "NVIDIA RTX A6000" } }
+```
+
+Status reservation allocations are `{"name", "resources"}`.
+
+These are format changes to the config, the request, the grant, and the
+status message. The project is pre-1.0 and the compatibility policy allows
+that; the docs already say to install the same version everywhere. This is
+the one break worth taking once.
+
+## Changes by layer
+
+### `reserved/core.py`
+
+- `Resources`: a frozen record over a sorted tuple of `(name, int)` pairs,
+  with `from_mapping()` as the validating constructor and mapping-style
+  access. A frozen dataclass does not freeze a dict, and the record must stay
+  hashable inside other frozen records.
+- `Metadata`: same shape; values must be `str`, `int`, `float`, or `bool`,
+  never `None`; keys are non-empty strings.
+- `Device(name, capacity: Resources, metadata: Metadata)` with a `kind`
+  property. `DeviceAvailability(device, available: Resources)`.
+- `DeviceAllocation(name, resources)` stays the request and ledger record.
+  New `GrantedAllocation(name, resources, metadata)` is what a grant returns.
+- `DeviceStatus(name, capacity, available, metadata)`.
+- `load_ledger()`: each device must have a string `name`, an optional
+  `resources` map, and a `metadata` map whose `kind` is a non-empty string.
+  Any other key is an error. A `cuda` device must carry a valid `uuid`.
+  Duplicate names are an error; today they silently shadow in the index.
+- `cuda_uuid(metadata)` replaces the name-based parser.
+- `grant()`: per allocation, the device must exist; each claimed resource
+  must be in `device.capacity`, else `unknown resource 'x' on device 'y'`;
+  available must cover the claim, else `insufficient x on 'y': need n, have
+  m`; subtract. The grant joins the device's metadata. `release()` adds back
+  per resource. Neither function names a resource.
+
+### `reserved/protocol.py`
+
+- `allocation_from_wire()` for requests and `granted_allocation_from_wire()`
+  for grants and `RESERVED_GRANTED_ALLOCATIONS`. Both reject unknown keys and
+  delegate value validation to the core records.
+- Serializers emit every key on every record; the status serializer emits the
+  nested device shape.
+- `daemon_state._handle_reserve` already maps `KeyError`, `TypeError`, and
+  `ValueError` to a `malformed request` response with the ledger unchanged.
+
+### `reserved/sdk/solvers.py` (interim, replaced in step two)
+
+- `_matches`: `constraint.kind` against `metadata.kind`, the name pin, and
+  each requested resource present in `available` with at least the amount.
+- `_place`: the allocation's resources are the constraint's resources,
+  subtracted from a working copy of `available`.
+- Ranking without naming a resource: mean available fraction over the
+  device's resources with nonzero capacity. Consolidate takes the lowest,
+  Spread the highest. Existing solver tests, which rank by RAM, must pass
+  with their expectations unchanged.
+
+### `reserved/sdk/client.py`
+
+- `DeviceConstraint(kind=None, *, name=None, **resources: int)`. The first
+  positional argument keeps its meaning, so `DeviceConstraint("cuda",
+  ram_mb=8192)` is unchanged. The parameter is renamed from `type` to `kind`,
+  and resources are validated at construction.
+- `Reservation.devices` becomes `list[GrantedAllocation]`.
+  `.resources["ram_mb"]` and `.metadata["kind"]` replace `.ram_mb`,
+  `.compute_units`, and prefix parsing. `GrantedAllocation` is exported.
+- `torch_device(granted)` dispatches on `metadata["kind"]`; CUDA uses
+  `metadata["uuid"]`.
+- `_lease_environment`: `CUDA_VISIBLE_DEVICES` from the UUIDs of cuda-kind
+  grants in first-grant order, distinct; `RESERVED_DEVICE` is the first grant
+  whose kind is not `cpu`, else the first grant; `RESERVED_GRANTED_ALLOCATIONS`
+  holds the granted records including metadata.
+
+### `reserved/bin/reserve.py`
+
+- `type=` and `name=` remain the constraint keys, so documented command lines
+  keep working; the docs call `type` the device kind. `ram` and `compute`
+  stay as aliases through a two-entry table. Every other key is a resource
+  claim, validated through `Resources.from_mapping`, so `ram=-1` or
+  `ram=abc` is a usage error naming the key.
+
+### `reserved/bin/reserve_status.py` and the dashboard in `reserved/daemon.py`
+
+- Human output per device: name, kind, `available: a/c <resource>` for each
+  declared resource in sorted order, then remaining metadata as `k=v`.
+  Allocation lines list claimed resources. The words `MB` and `compute`
+  leave the output.
+- HTML: Name, Kind, one column per resource in the sorted union across
+  devices, Metadata. Reservations: ID, Label, Age, Device, one column per
+  resource in the union across allocations. Missing cells show `—`.
+
+### `reserved/bin/generate_config.py`
+
+- Emits the new shape: name `cuda:GPU-<uuid>` as a default, `resources` with
+  `ram_mb` and `compute_units`, `metadata` with `kind`, `uuid`, and `model`
+  from torch's device name. Still validated through `core.load_ledger`.
+
+### Config files, examples, docs
+
+- Convert `reserved.example.json` (also fixing its stale `cuda:0` names and
+  its `model` field, which becomes metadata), `examples/cpu.json`,
+  `examples/cuda.json`, `examples/cuda_dual.json`, `examples/m2_mac.json`.
+- `README.md`, `ARCHITECTURE.md`, `RESERVED_DESIGN.md`, `GETTING_STARTED.md`,
+  and `examples/README.md`: config snippets, the three categories and value
+  rules, wire examples, status samples, `GrantedAllocation` fields, and the
+  CUDA section (the UUID lives in metadata and the mask is built from it).
+
+## Tests
+
+Fixtures are reshaped first across the suite, including `tests/cuda_support.py`
+and the `daemon_env` fixture in `tests/test_inherited_lease.py`. The
+inherited-lease suite is the real check that CUDA masks and torch mapping
+work from metadata.
+
+New or changed assertions:
+
+- Core: `Resources` and `Metadata` validation tables (absent, 0, positive,
+  `-1`, `None`, `True`, `"5"`, `2.5`, empty key; metadata rejects `None` and
+  nested values); `load_ledger` rejects a device without `kind`, a cuda device
+  without a valid `uuid`, an unknown top-level key, and a duplicate name;
+  grant rejects an unknown resource with the ledger unchanged; grant and
+  release on a device declaring only a custom resource `widgets`; the grant
+  carries the device's metadata; exact fit and one-over cases.
+- Protocol: request round trip; omitted `resources` parses to empty; unknown
+  key, `null`, `-1`, `"5"`, and `true` raise; granted round trip includes
+  metadata; nested status shape.
+- Daemon state: a negative claim and an unknown resource each yield a failure
+  response and leave the ledger and leases unchanged.
+- Solvers: kind matching via metadata; a resource the device lacks does not
+  match; existing ranking expectations hold; a device set with only
+  `widgets` solves.
+- CLI: aliases work; `foo=3` becomes a claim; `ram=-1` and `ram=abc` are
+  usage errors; the exec environment builds the CUDA mask from metadata.
+- SDK: `DeviceConstraint("cuda", ram_mb=-1)` raises; `torch_device` on a
+  cuda grant under a reordered mask (existing parametrization); a grant of
+  unknown kind raises; `child_env` to `adopt_inherited_lease` round trip
+  preserves resources and metadata.
+- Generator: records have the three categories; `uuid` equals the name's
+  UUID; `model` is torch's device name.
+- Real daemon: a config with `widgets: 2` grants two one-widget leases,
+  rejects a third naming `widgets`, and grants it after a release. This
+  proves a new resource needs no code.
+
+## Verification
+
+1. `make check` after the last code change; record the pytest summary line.
+2. Manual on a CPU-only machine: daemon with the converted `examples/cpu.json`
+   on a demo socket; `reserve-status`; `reserve demo ram=256 -- sleep 30`;
+   `reserve demo ram=-1 -- true` (usage error); a raw socket request claiming
+   `widgets` (rejected, status unchanged); the HTTP dashboard.
+3. Real-card CUDA mapping on the 4x A6000 machine: each granted UUID resolves
+   to the torch device with that UUID under the launcher's mask and in an
+   unmasked process. If this is not run before merge, name it as a gap.
+4. Every JSON example in the markdown files parses and loads with
+   `core.load_ledger`.
+
+## Observable changes to document
+
+- Config format: three categories; `type` becomes `metadata.kind`; CUDA
+  `uuid` in metadata.
+- Request and grant allocation records nest `resources`; grants carry
+  `metadata`; status devices nest `capacity`, `available`, and `metadata`.
+- Human status wording; stricter rejection of malformed values; rejection of
+  unknown resources.
+- `GrantedAllocation` replaces `DeviceAllocation` in `Reservation.devices`;
+  the `DeviceConstraint` parameter `type` is renamed `kind`.
+
+## Steps two and three
+
+**Step two: constraint language and solver.** A request may claim several
+reservations; each reservation may claim several devices; reservations
+release independently because callers optimize globally across applications.
+Variables are scoped per reservation and referenced across reservations by
+label, as `alpha.a`. Variables do not bind distinct devices by default; the
+base model and its LoRA may share a card, and two cards are requested with
+`c.name != d.name`. Two expression kinds exist. Metadata constraints compare
+immutable operands: `var.name`, `var.metadata.<key>`, and the read-only
+configured total `var.capacity.<resource>`, with `==`, `!=`, `<`, `<=`, `>`,
+`>=`, and literals, several constraints forming an implicit AND. Resource
+requests consume: `var.<resource> = n`. The solver copies the snapshot's
+remaining capacity, assigns devices to variables by backtracking, subtracts
+every claim from every reservation as it goes, and rejects any assignment that
+takes any resource on any device below zero. Consolidate and Spread become
+candidate orderings. The output is today's explicit request. The CLI and SDK
+share one string grammar; today's `DeviceConstraint("cuda", ram_mb=8192)`
+desugars into it.
+
+The sample that drove the design:
+
+```text
+request
+  reservation alpha
+    where   a.metadata.kind == "cuda"
+            a.metadata.nvfp4 == true
+    consume a.ram_mb = 10240
+  reservation beta
+    where   b.name == alpha.a.name
+    consume b.ram_mb = 2048
+  reservation delta
+    where   c.metadata.kind == "cuda"
+            d.metadata.kind == "cuda"
+            c.name != d.name
+    consume c.ram_mb = 10240
+            d.ram_mb = 20480
+```
+
+**Step three: the service feature.** A device of kind `service` with a
+`concurrency` resource, for example `service:anthropic` at 8. A per-call lease
+claims `concurrency: 1` and releases on completion; a worker-lifetime lease
+claims its allowance at start. Mechanics for a kind with no environment mask,
+documentation, and a real-daemon test bounding parallel calls. Expected to
+touch no core, protocol, or solver code.
+
+Deferred beyond these steps: a client-side bounded wait on a full service,
+weighted tokens-in-flight claims, provider placement across local and hosted
+services, API key distribution and rotation, and cumulative token budgets.
+The last two change stated guarantees and need their own design documents.
