@@ -11,7 +11,7 @@ import types
 import pytest
 
 from reserved.core import DeviceAllocation
-from reserved.sdk.client import Reservation, _connect, torch_device
+from reserved.sdk.client import Reservation, _connect, _python_environment, torch_device
 from reserved.sdk.errors import DaemonNotRunningError, ReservationError, ReservationExpiredError
 import reserved.sdk.client as client_module
 from tests.cuda_support import cuda_name, fake_torch
@@ -207,3 +207,25 @@ def test_child_env_requires_a_reservation_id():
                 r.child_env({})
         finally:
             r.release()
+
+
+def test_python_environment_activates_the_worker_environment_without_mutating_base():
+    base = {"PATH": "/orchestrator/bin:/usr/bin", "VIRTUAL_ENV": "/orchestrator",
+            "PYTHONPATH": "/orchestrator/src", "PYTHONHOME": "/elsewhere", "KEEP": "yes"}
+
+    env = _python_environment(base, "/workers/tts-env")
+
+    assert base["PYTHONPATH"] == "/orchestrator/src"
+    assert env == {"PATH": "/workers/tts-env/bin:/orchestrator/bin:/usr/bin",
+                   "VIRTUAL_ENV": "/workers/tts-env", "KEEP": "yes"}
+
+
+def test_python_environment_without_a_base_path_uses_only_the_worker_bin():
+    assert _python_environment({}, "/workers/tts-env") == {
+        "PATH": "/workers/tts-env/bin", "VIRTUAL_ENV": "/workers/tts-env",
+    }
+
+
+def test_popen_python_requires_a_held_lease_before_touching_the_filesystem(tmp_path):
+    with pytest.raises(ReservationExpiredError, match="not acquired"):
+        Reservation("job").popen_python(tmp_path, "model_worker")

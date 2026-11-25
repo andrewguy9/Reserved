@@ -142,7 +142,7 @@ the [resource config reference](README.md#resource-config).
 | Python worker that can check its lease between batches | `Reservation` context manager | The worker |
 | Existing command that needs a reservation and CUDA masking | `reserve LABEL DEVICE -- CMD` | The command and any inherited lease copies |
 | Python worker launched by `reserve` that checks or releases its lease | `adopt_inherited_lease()` | The worker and any inherited lease copies |
-| Python orchestrator that starts workers in other environments | `Reservation.popen(...)` | The orchestrator and each worker's lease copy |
+| Python orchestrator that starts workers in other environments | `Reservation.popen_python(...)` or `popen(...)` | The orchestrator and each worker's lease copy |
 | Several reservations that must be granted together | `Request(...).acquire()` | The caller, with explicit `release()` cleanup |
 | Coordinator inspecting capacity | `reserve-status --json` | Status is a snapshot and holds no capacity |
 
@@ -200,9 +200,9 @@ with sdk.Reservation("model-worker", sdk.DeviceConstraint("cuda", ram_mb=8192)) 
 ```
 
 The orchestrator keeps its own lease copy, so a worker that crashes does not
-return capacity until the orchestrator releases or relaunches. Install the same
-Reserved version in the orchestrator's and each worker's environment, since the
-worker's SDK reads the variables the orchestrator's SDK writes.
+return capacity until the orchestrator releases or relaunches. When the worker
+runs from another virtual environment, follow
+[Work with several virtual environments](#work-with-several-virtual-environments).
 
 ### CUDA device indices
 
@@ -235,6 +235,129 @@ Resolving a CUDA grant initializes CUDA, so call `torch_devices()` in the
 process that will use the GPU.
 See [CUDA device indexing](ARCHITECTURE.md#cuda-device-indexing).
 
+## Work with several virtual environments
+
+Model families often need dependency sets that cannot share one environment.
+The usual layout is an orchestrator in one virtual environment that starts each
+model worker from the worker's own environment. The lease handoff is a file
+descriptor and a few environment variables, so it works across that boundary.
+
+The rule behind every step here: **choose the worker's packages by choosing
+its interpreter, never by adjusting its import path.** Python searches the
+working directory first (for `python -m`), then `PYTHONPATH`, then the
+interpreter's own environment, which includes editable installs. A path
+override therefore loses silently to the working directory, and falls through
+silently to the installed copy when it names a directory that does not contain
+the package. The interpreter's environment is the one part of that search the
+orchestrator can fix in advance.
+
+### 1. Install the same version of Reserved in each environment
+
+The orchestrator needs Reserved to acquire and launch. A Python worker that
+adopts its lease needs Reserved to import `reserved.sdk`. Install the same
+version in both, since the worker's SDK reads the variables the orchestrator's
+SDK writes. The SDK uses only the standard library, so a worker environment
+can install without dependencies:
+
+```bash
+/absolute/path/to/model-env/bin/python -m pip install --no-deps \
+  "git+https://github.com/andrewguy9/Reserved.git"
+```
+
+### 2. Launch the worker with `popen_python()`
+
+Name the worker's environment and the module to run:
+
+```python
+from reserved import sdk
+
+with sdk.Reservation("model-worker", sdk.DeviceConstraint("cuda", ram_mb=8192)) as r:
+    worker = r.popen_python("/absolute/path/to/model-env", "model_worker")
+    worker.wait()
+```
+
+The first argument is a directory with a `bin/python`: a venv, uv, or conda
+environment. Further positional arguments become the module's command-line
+arguments, and keyword arguments go to `subprocess.Popen` as with `popen()`.
+
+`popen_python()` runs the equivalent of this `popen()` call:
+
+```python
+import os
+
+venv = "/absolute/path/to/model-env"
+env = {**os.environ, "VIRTUAL_ENV": venv, "PATH": f"{venv}/bin:{os.environ['PATH']}"}
+env.pop("PYTHONPATH", None)
+env.pop("PYTHONHOME", None)
+worker = r.popen([f"{venv}/bin/python", "-P", "-m", "model_worker"], env=env)
+```
+
+Each piece closes one way a worker ends up running the wrong code:
+
+- **The interpreter path** decides which packages the worker imports.
+- **`-P`** keeps the worker's working directory off its import path. Without
+  it, `python -m` puts the current directory first, ahead of `PYTHONPATH` and
+  of every installed package, so a worker started in a source checkout imports
+  that checkout. In a printed `sys.path` that entry appears as `''`, which is
+  easy to read past.
+- **`VIRTUAL_ENV` and `PATH`** do what the environment's `activate` script
+  does, so programs the worker runs by name, such as `python` or a tool
+  installed in its environment, resolve into the worker's environment.
+- **Dropping `PYTHONPATH`** keeps the orchestrator's trees from being placed
+  ahead of the worker's installed packages. **Dropping `PYTHONHOME`** keeps the
+  worker's standard library its own.
+
+Use the `popen()` form directly when the worker needs something different, for
+example its working directory on the import path (omit `-P` and pass `cwd=` to
+a directory you control instead). Do not launch through a shell that sources
+`activate`; shell startup files can change the environment in ways the
+orchestrator cannot see.
+
+Before relying on a launch, ask the interpreter what it will import, invoked
+the way the worker is invoked: same interpreter, same flags, same working
+directory, same environment:
+
+```bash
+/absolute/path/to/model-env/bin/python -P -c "import model_worker; print(model_worker.__file__)"
+```
+
+The printed path is the tree the worker will run. If it is not the one you
+expect, fix the environment; no launch option will override it.
+
+The `reserve` command gives the same result when the worker environment's
+interpreter is named after `--`. The command passes its own environment through
+unchanged, so clear `PYTHONPATH` first:
+
+```bash
+env -u PYTHONPATH reserve model-worker type=cuda,ram=8192 -- /absolute/path/to/model-env/bin/python -P -m model_worker
+```
+
+### 3. Adopt the lease in the worker as usual
+
+Nothing changes inside the worker. It calls `adopt_inherited_lease()` at
+startup and `check()` between units of work, exactly as under `reserve`.
+
+### If a step is skipped
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Worker raises `ReservationError` naming `RESERVED_GRANTED_ALLOCATIONS` or `RESERVED_FD` at startup | The two environments have different Reserved versions | Reinstall both from the same commit (step 1) |
+| `ModuleNotFoundError: reserved` in the worker | Reserved is not installed in the worker environment | Install it there (step 1) |
+| A worker started with `-m` or `-c` imports from the orchestrator's working directory, with no error, and `sys.path` shows `''` first | The working directory is searched before `PYTHONPATH` and before installed packages | Use `popen_python()`, or run the worker with `-P` or `cwd=` set to a neutral directory (step 2) |
+| `PYTHONPATH` names a tree and the worker imports a different one, with no error | The named directory does not contain the package, so the search falls through to the installed copy | Do not select a tree with `PYTHONPATH`; install the tree in the environment whose interpreter runs the worker (step 2) |
+| A tool the worker runs by name comes from the orchestrator's environment | The worker inherited the orchestrator's `PATH` and `VIRTUAL_ENV` | Use `popen_python()`, or set those variables in the `env=` passed to `popen()` (step 2) |
+
+### Workers that are not Python
+
+A worker in another language needs no Reserved install. It holds the
+descriptor named by `RESERVED_FD` and keeps the lease by staying alive; the
+daemon reclaims the capacity when the last copy of the descriptor closes. The
+descriptor becomes readable with end-of-file when the daemon restarts, which is
+the same signal `check()` reports. The granted devices are in
+`RESERVED_DEVICES` and `RESERVED_GRANTED_ALLOCATIONS`, and CUDA visibility is
+already masked. See the
+[environment variable table](README.md#command-line-wrapper-reserve).
+
 ## Handle failures
 
 | Observation | Application action |
@@ -244,6 +367,7 @@ See [CUDA device indexing](ARCHITECTURE.md#cuda-device-indexing).
 | `ReservationExpiredError` from `check()` | Stop using the invalid lease and recover the work through the application. |
 | `ReservationError` from `torch_devices()` for a hidden CUDA grant or invalid mask | Check the physical grant name and the process's CUDA visibility. |
 | Capacity remains claimed after a worker exits | Check whether a child or another process still holds a lease copy. |
+| `ReservationError` naming `RESERVED_GRANTED_ALLOCATIONS` or `RESERVED_FD` when a worker adopts | The launching and worker environments run different Reserved versions; reinstall both from the same commit. |
 
 `DaemonNotRunningError` and `ReservationExpiredError` inherit from
 `ReservationError`; catch them first if handling the cases separately. Transport

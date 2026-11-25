@@ -340,12 +340,26 @@ relaunch a crashed worker under the same grant, or release it to let the
 worker's lifetime end the reservation. A worker that exits does not return
 capacity while the parent still holds the lease.
 
+For a Python worker in another environment, `popen_python()` takes the
+environment directory and the module to run. It starts that environment's
+`bin/python` with `-P -m module`, puts the environment's `bin` first on `PATH`,
+sets `VIRTUAL_ENV`, and drops `PYTHONPATH` and `PYTHONHOME`, so the worker
+imports only from its own environment. Further positional arguments are the
+module's arguments; keyword arguments go to `subprocess.Popen`.
+
+```python
+with Reservation("tts", DeviceConstraint("cuda", ram_mb=8192)) as r:
+    worker = r.popen_python("/path/to/tts-env", "tts_worker", "--port", "9000")
+    worker.wait()
+```
+
 `child_env(base_env)` returns the variables without starting a process, and
 `lease_fd` is the descriptor to pass, for other launchers such as
 `asyncio.create_subprocess_exec(..., pass_fds=[r.lease_fd], env=r.child_env())`.
-Both raise `ReservationExpiredError` once the reservation is released. Install
-the same version of Reserved in the parent's and each worker's environment,
-since adoption reads the variables this version writes.
+All of these raise `ReservationExpiredError` once the reservation is released.
+For a worker in another virtual environment, including the version the worker
+must install, see the getting-started guide's
+[Work with several virtual environments](GETTING_STARTED.md#work-with-several-virtual-environments).
 
 ### PyTorch device selection
 
