@@ -67,6 +67,13 @@ negative; `null`, negative, string, and fractional values are invalid; a claim
 on a resource the device does not declare is rejected, because the daemon
 cannot account for it.
 
+**One namespace per device.** A device's resource names and metadata keys
+must be disjoint, and neither may be `name`. The daemon checks this at config
+load. The two maps exist so the daemon knows what to account and what to
+report; a caller refers to a key as `a.ram_mb` or `a.kind` without saying
+which map it came from, because the clause it appears in already says so
+(see step two).
+
 The daemon stays explicit and best effort. A solver reads one snapshot and
 plans against it; the daemon re-checks on grant; a stale snapshot means a
 rejection and a re-plan. No queuing is added.
@@ -143,7 +150,9 @@ the one break worth taking once.
 - `load_ledger()`: each device must have a string `name`, an optional
   `resources` map, and a `metadata` map whose `kind` is a non-empty string.
   Any other key is an error. A `cuda` device must carry a valid `uuid`.
-  Duplicate names are an error; today they silently shadow in the index.
+  Resource names and metadata keys must be disjoint and must not be `name`.
+  Duplicate device names are an error; today they silently shadow in the
+  index.
 - `cuda_uuid(metadata)` replaces the name-based parser.
 - `grant()`: per allocation, the device must exist; each claimed resource
   must be in `device.capacity`, else `unknown resource 'x' on device 'y'`;
@@ -290,11 +299,16 @@ release independently because callers optimize globally across applications.
 Variables are scoped per reservation and referenced across reservations by
 label, as `alpha.a`. Variables do not bind distinct devices by default; the
 base model and its LoRA may share a card, and two cards are requested with
-`c.name != d.name`. Two expression kinds exist. Metadata constraints compare
-immutable operands: `var.name`, `var.metadata.<key>`, and the read-only
-configured total `var.capacity.<resource>`, with `==`, `!=`, `<`, `<=`, `>`,
-`>=`, and literals, several constraints forming an implicit AND. Resource
-requests consume: `var.<resource> = n`. The solver copies the snapshot's
+`c.name != d.name`. Two clauses exist, and the clause determines what an
+operand means. In `where`, every operand is immutable: `var.name` is the
+device's identity, `var.<key>` is a metadata scalar or a resource's
+configured total, and literals are strings, integers, floats, or booleans;
+operators are `==`, `!=`, `<`, `<=`, `>`, `>=`, with several constraints
+forming an implicit AND. Remaining capacity never appears in a predicate.
+In `consume`, `var.<key> = n` claims a resource. Because a device's resource
+names and metadata keys are disjoint, no prefix is needed to tell them
+apart; "a card with over 24 GB" is `where c.ram_mb >= 24576`, and "claim 10
+GB of it" is `consume c.ram_mb = 10240`. The solver copies the snapshot's
 remaining capacity, assigns devices to variables by backtracking, subtracts
 every claim from every reservation as it goes, and rejects any assignment that
 takes any resource on any device below zero. Consolidate and Spread become
@@ -307,15 +321,15 @@ The sample that drove the design:
 ```text
 request
   reservation alpha
-    where   a.metadata.kind == "cuda"
-            a.metadata.nvfp4 == true
+    where   a.kind == "cuda"
+            a.nvfp4 == true
     consume a.ram_mb = 10240
   reservation beta
     where   b.name == alpha.a.name
     consume b.ram_mb = 2048
   reservation delta
-    where   c.metadata.kind == "cuda"
-            d.metadata.kind == "cuda"
+    where   c.kind == "cuda"
+            d.kind == "cuda"
             c.name != d.name
     consume c.ram_mb = 10240
             d.ram_mb = 20480
