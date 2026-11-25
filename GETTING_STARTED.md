@@ -242,12 +242,14 @@ The usual layout is an orchestrator in one virtual environment that starts each
 model worker from the worker's own environment. The lease handoff is a file
 descriptor and a few environment variables, so it works across that boundary.
 
-The principle behind every step here: **the interpreter decides what a process
-imports.** A worker imports from the environment its interpreter belongs to.
-`PYTHONPATH` and the working directory are consulted only after that
-environment has had its say, and an editable install (`pip install -e`) can
-register an import finder that runs before either is searched. So choose the
-worker's packages by choosing its interpreter, never by adjusting its path.
+The rule behind every step here: **choose the worker's packages by choosing
+its interpreter, never by adjusting its import path.** Python searches the
+working directory first (for `python -m`), then `PYTHONPATH`, then the
+interpreter's own environment, which includes editable installs. A path
+override therefore loses silently to the working directory, and falls through
+silently to the installed copy when it names a directory that does not contain
+the package. The interpreter's environment is the one part of that search the
+orchestrator can fix in advance.
 
 ### 1. Install the same version of Reserved in each environment
 
@@ -292,18 +294,19 @@ with sdk.Reservation("model-worker", sdk.DeviceConstraint("cuda", ram_mb=8192)) 
 The interpreter path is the choice that matters. The two variables do what the
 environment's `activate` script does, so programs the worker runs by name, such
 as `python` or a tool installed in its environment, resolve into the worker's
-environment. `PYTHONPATH` and `PYTHONHOME` are removed because they cannot be
-relied on to choose a tree: an installed package wins over them, so leaving
-them in misleads anyone reading the worker's environment. Do not launch
-through a shell that sources `activate`; shell startup files can change the
-environment in ways the orchestrator cannot see.
+environment. `PYTHONPATH` is removed because it belongs to the orchestrator:
+it would put the orchestrator's trees ahead of the worker's installed packages.
+`PYTHONHOME` is removed because it would repoint the worker's standard library.
+Do not launch through a shell that sources `activate`; shell startup files can
+change the environment in ways the orchestrator cannot see.
 
-If the orchestrator runs from a source checkout, also pass `cwd=` to `popen()`
-so the worker does not start in that directory. The working directory is on
-the import path and can shadow an installed copy that is not editable.
+Also pass `cwd=` to `popen()` when the orchestrator runs from a source
+checkout. With `-m`, the working directory is searched before everything else,
+so a worker started in a checkout imports that checkout, whatever was
+installed or named in `PYTHONPATH`.
 
-Before relying on a launch, ask the interpreter what it will import, from the
-directory the worker will run in:
+Before relying on a launch, ask the interpreter what it will import, with the
+working directory and environment the worker will have:
 
 ```bash
 /absolute/path/to/model-env/bin/python -c "import model_worker; print(model_worker.__file__)"
@@ -332,7 +335,7 @@ startup and `check()` between units of work, exactly as under `reserve`.
 | Worker raises `ReservationError` naming `RESERVED_GRANTED_ALLOCATIONS` or `RESERVED_FD` at startup | The two environments have different Reserved versions | Reinstall both from the same commit (step 1) |
 | `ModuleNotFoundError: reserved` in the worker | Reserved is not installed in the worker environment | Install it there (step 1) |
 | A tool the worker runs by name comes from the orchestrator's environment | The worker inherited the orchestrator's `PATH` and `VIRTUAL_ENV` | Pass `env=worker_env(venv)` (step 2) |
-| The worker imports a different tree than `PYTHONPATH` or the launch directory names, with no error | The package is installed in the interpreter's environment, often editable, and that install is found first | Run the environment whose install you want; never select a tree with `PYTHONPATH` (step 2) |
+| The worker imports a different tree than `PYTHONPATH` names, with no error | The working directory is searched before `PYTHONPATH`, or `PYTHONPATH` names a directory that does not contain the package and the search falls through to the copy installed in the interpreter's environment, editable or not | Do not select a tree with `PYTHONPATH`; run the interpreter of the environment that has the tree installed, and pass `cwd=` (step 2) |
 | The worker imports Reserved from the source checkout | The worker's working directory is the checkout | Pass `cwd=` to `popen()` (step 2) |
 
 ### Workers that are not Python
