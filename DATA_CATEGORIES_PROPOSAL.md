@@ -345,15 +345,17 @@ belongs to a group; ungrouped reservations form one implicit required group,
 so existing code behaves as today. A group may be marked `optional`. The
 solver places required groups first, then optional groups in declared order
 against its working copy, drops optional groups that do not fit, and emits
-one explicit request for the placed set. The SDK result names the granted
-reservations and the dropped labels with a reason each; a dropped optional
-reservation is a planning outcome, not an error. Cross-reservation
-references may point within a group or from an optional group to a required
-one, never from a required group into an optional one, since a required
-reservation cannot depend on a device that may never be chosen. If the daemon
-rejects because the snapshot went stale, the whole attempt fails and the
-caller re-plans, which is the existing contract. Status shows granted
-optional reservations as ordinary independent reservations, which they are.
+explicit requests for the placed set (one for all required groups, then one
+per optional group; see "A plan is a sequence of atomic attempts" below).
+The SDK result names the granted reservations and the dropped labels with a
+reason each; a dropped optional reservation is a planning outcome, not an
+error. Cross-reservation references may point within a group or from an
+optional group to a required one, never from a required group into an
+optional one, since a required reservation cannot depend on a device that may
+never be chosen. If the daemon rejects the required request because the
+snapshot went stale, the attempt fails and the caller re-plans, which is the
+existing contract. Status shows granted optional reservations as ordinary
+independent reservations, which they are.
 "At least K of the optional groups" is a natural later extension.
 
 ```text
@@ -371,6 +373,96 @@ claims `concurrency: 1` and releases on completion; a worker-lifetime lease
 claims its allowance at start. Mechanics for a kind with no environment mask,
 documentation, and a real-daemon test bounding parallel calls. Expected to
 touch no core, protocol, or solver code.
+
+## Layering and the SDK shape
+
+From the bottom up, each layer knows strictly less about the caller's intent.
+
+1. **Daemon.** Ledger, check-and-subtract, lease fds. Speaks only explicit
+   named allocations. All-or-nothing per request. Knows nothing about kinds
+   beyond validating a CUDA UUID, nothing about groups, nothing about why.
+2. **Protocol.** Record shapes and value validation. No policy.
+3. **Transport.** Fetch a snapshot; send one request and receive a grant with
+   its fds. One function each.
+4. **Planner.** A pure function from a query and a snapshot to a plan. All
+   strategy lives here: matching metadata, consuming a working copy, ordering
+   groups, dropping optional groups, placement preference. No IO, so it is
+   testable with dict fixtures and usable as a dry run.
+5. **Acquisition.** Runs snapshot, plan, submit, and maps fds to
+   `Reservation` handles. Owns the lease lifetime API: `check()`,
+   `release()`, `popen()`.
+6. **Mechanics.** `torch_device`, environment masks, lease handoff. Keyed on
+   `metadata.kind`. The only layer that knows what a CUDA card is.
+7. **CLI.** Parses one reservation into a query, calls layers 4 through 6,
+   and execs.
+
+The dividing line sits between 3 and 4. Everything below is subtraction;
+everything above is proposal.
+
+**A plan is a sequence of atomic attempts.** The planner emits an ordered
+list of wire requests, each all-or-nothing at the daemon. All required
+groups go in the first request together; the daemon already provides that
+atomicity. Each optional group becomes its own request, in declared order.
+The SDK submits them in sequence. If the required request is rejected,
+nothing optional is attempted and the caller gets an error. If an optional
+request is rejected because another client won a race, that group is
+reported as dropped with the reason "rejected at grant", distinct from "did
+not fit the snapshot". Races degrade one optional group at a time instead of
+failing the whole set, at the cost of a few extra round trips on a local
+socket.
+
+**SDK shape, illustrative and for review only:**
+
+```python
+# Pure planning, no IO. Also a dry run: "how many voices fit right now?"
+plan = request.plan(snapshot)
+plan.attempts      # ordered atomic wire requests
+plan.dropped       # label -> "did not fit"
+
+# Acquisition
+outcome = request.acquire_available()
+outcome.granted    # label -> Reservation, each holding its own lease
+outcome.dropped    # label -> reason: "did not fit" or "rejected at grant"
+```
+
+`Request.acquire()` keeps its current contract for all-required requests: a
+tuple of reservations, or an exception. Only requests with optional groups
+need the richer outcome, so existing code is unchanged. The dry run answers
+the question `WORKER_GROWTH_PROPOSAL.md` set out to answer, as a count of
+placed labels, with no separate helper.
+
+**Patterns by workload:**
+
+| Workload | Entry point | Expected pattern |
+| --- | --- | --- |
+| One training job | `with Reservation(...)` | Acquire or raise. The caller decides when to retry. |
+| Checkpoint plus LoRA | `Request(...).acquire()` | Atomic acquire, release independently. Unchanged. |
+| Ten voices, elastic pool | `Request(..., optional)` with `acquire_available()` | The loop below. |
+| Orchestrator with its own placement | pinned names, or explicit requests | Enters at layer 3. Owns re-planning. |
+| Non-Python worker | `reserve` CLI | Single reservation, lease by fd. Unchanged. |
+| Service call (step three) | `with Reservation("call", ...)` per call, or one allowance per worker | Short lease in a loop, or one long lease. |
+
+The elastic pool pattern developers should expect:
+
+```python
+pending = {f"voice-{i}": voice_spec for i in range(10)}
+held = {}
+while pending or held:
+    if pending:
+        outcome = Request(
+            *[Reservation(label, *voice_spec, optional=True) for label in pending]
+        ).acquire_available()
+        for label, reservation in outcome.granted.items():
+            held[label] = start_render(reservation)
+            del pending[label]
+    done = wait_for_any(held)          # the caller's own work loop
+    for label in done:
+        held.pop(label).release()      # capacity returns; the next pass re-plans
+```
+
+Dropped voices are normal, not errors. The caller re-plans when its own
+releases return capacity, or after a backoff, rather than spinning. The
+daemon never pushes notifications, and the design keeps it that way.
 
 Deferred beyond these steps: a client-side bounded wait on a full service,
 weighted tokens-in-flight claims, provider placement across local and hosted
