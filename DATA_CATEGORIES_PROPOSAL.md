@@ -335,6 +335,36 @@ request
             d.ram_mb = 20480
 ```
 
+**Grouping and optional reservations.** Some callers want several
+reservations granted together or not at all (a base model and its LoRA held
+on separate leases) while others want whichever of a set fits now and the
+rest later (ten voices for a book render). The daemon does not learn about
+either. It stays all-or-nothing over whatever list it receives, and the
+solver decides what goes in that list. In the language, every reservation
+belongs to a group; ungrouped reservations form one implicit required group,
+so existing code behaves as today. A group may be marked `optional`. The
+solver places required groups first, then optional groups in declared order
+against its working copy, drops optional groups that do not fit, and emits
+one explicit request for the placed set. The SDK result names the granted
+reservations and the dropped labels with a reason each; a dropped optional
+reservation is a planning outcome, not an error. Cross-reservation
+references may point within a group or from an optional group to a required
+one, never from a required group into an optional one, since a required
+reservation cannot depend on a device that may never be chosen. If the daemon
+rejects because the snapshot went stale, the whole attempt fails and the
+caller re-plans, which is the existing contract. Status shows granted
+optional reservations as ordinary independent reservations, which they are.
+"At least K of the optional groups" is a natural later extension.
+
+```text
+request
+  group pair                                   # required by default
+    reservation base  where a.kind == "cuda"          consume a.ram_mb = 8192
+    reservation lora  where b.name == pair.base.a.name consume b.ram_mb = 2048
+  reservation voice-1 optional  where v.kind == "cuda" consume v.ram_mb = 4096
+  reservation voice-2 optional  where v.kind == "cuda" consume v.ram_mb = 4096
+```
+
 **Step three: the service feature.** A device of kind `service` with a
 `concurrency` resource, for example `service:anthropic` at 8. A per-call lease
 claims `concurrency: 1` and releases on completion; a worker-lifetime lease
