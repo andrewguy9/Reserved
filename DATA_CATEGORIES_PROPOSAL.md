@@ -1,46 +1,84 @@
 # Resources and Metadata: Data Categories for Devices
 
-## Decision for review
+## Executive summary
 
-Reshape a device into three parts: a free-form `name`, a map of `resources`
-that obey semaphore rules, and a map of `metadata` scalars that describe the
-device and never change. Make the daemon's accounting generic over resource
-names, validate every value at the config and wire boundaries, and carry the
-device's metadata in each grant so a worker can build its CUDA mask from the
-grant alone.
+Reserved coordinates hardware on one machine through leases. A process claims
+capacity, holds a file descriptor, and the daemon reclaims the capacity when
+the descriptor closes. We want the same mechanism to bound parallel requests
+to a service: a hosted model API or a local inference server. Designing that
+one feature showed that the lease model already fits and the data model does
+not. This document proposes three steps.
 
-This is step one of three. Step two is a relational constraint language and
-solver in the SDK. Step three is the first service feature: a `service` kind
-of device with a `concurrency` resource that bounds parallel requests to an
-API or a local inference server. Step one is done right if step two can read
-everything it needs from status, and step three lands with no core, protocol,
-or solver change.
+1. **Data categories.** A device becomes a free-form `name`, a map of
+   `resources` that obey semaphore rules, and a map of immutable scalar
+   `metadata`. The daemon's accounting becomes generic over resource names,
+   every value is validated at the config and wire boundaries, and each grant
+   carries the device's metadata so a worker can build its CUDA mask from the
+   grant alone. This step changes the config, request, grant, and status
+   formats once, pre-1.0.
+2. **Constraint language and solver.** In the SDK and CLI only: per-reservation
+   variables, metadata constraints, resource claims, groups that are required
+   or optional, and a backtracking solver that plans against one snapshot and
+   emits a sequence of atomic requests.
+3. **The service feature.** A `service` kind with a `concurrency` resource.
+   Expected to need no core, protocol, or solver change, which is the test
+   that steps one and two were shaped correctly.
 
-## Why
+Throughout, the daemon stays a subtraction machine that grants or rejects one
+explicit request atomically. Everything that looks like judgment lives in the
+solver, which proposes what to attempt.
 
-The motivating feature was an upper bound on parallel requests to a service.
-The lease model already fits: a service is a device, an in-flight call or a
-long-lived worker holds a lease on some of its capacity, and the daemon
-reclaims it when the lease fd closes. What did not fit was the data model.
-`ram_mb` and `compute_units` are named fields on `Device`, `DeviceAllocation`,
-`DeviceStatus`, `DeviceConstraint`, both solvers, both CLIs, the dashboard,
-and the wire. Adding `concurrency` as a third field would repeat that pattern
-for every future resource.
+## The problems we encountered
 
-The discussion also surfaced requests the current model cannot express:
+The shape of this proposal is the sum of six problems met in order while
+trying to add the service feature. Each resolution is a design rule the rest
+of the document applies.
 
-- two CUDA cards whose total memory is over 24 GB (a fact about the card, not
-  a claim on its free capacity);
-- two CUDA cards on the same NVLink network (a relation between devices);
-- a host power budget shared by every card (a resource that lives on a pool
-  rather than a device).
+**1. A third hard-coded resource.** The service feature needs a count of
+simultaneous requests. Reusing `compute_units` for it was rejected because the
+name is unclear. Adding a `concurrency` field would mean touching `Device`,
+`DeviceAllocation`, `DeviceStatus`, `DeviceConstraint`, both solvers, both
+CLIs, the dashboard, and the wire, and doing it again for every resource after
+that. *Rule:* resource accounting is generic over names. Code must not depend
+on `ram_mb` or `compute_units`.
 
-All three resolve to facts about devices plus generic capacity plus solver
-policy. None needs the daemon to understand kinds beyond identity validation,
-and none needs hierarchy in the ledger.
+**2. Generic over resources is not ignorant of kind.** The first attempt to
+make everything generic ran into the parts of the system that must know what a
+CUDA card is: the `CUDA_VISIBLE_DEVICES` mask, the torch device lookup, and
+UUID validation. Those are mechanics, not accounting. *Rule:* two data
+categories. Resources are counted; metadata is matched. `kind` is metadata,
+authoritative for the mechanics layer, and the only metadata key the daemon
+reads.
 
-Parsing is also lenient today. `int(obj.get(key, 0))` accepts `-1`, `"5"`, and
-`2.7`, and a negative allocation would increase availability on grant.
+**3. Facts the model cannot express.** Three requests had nowhere to live:
+two cards whose total memory is over 24 GB, two cards on the same NVLink
+network, and a host power budget shared by every card. The first is a fact
+about a card, which today's `ram_mb=N` conflates with a claim on free
+capacity. The second is a relation between devices. The third is capacity on
+a pool rather than a device. *Rules:* metadata holds facts; a constraint
+language in the solver expresses relations such as `a.nvlink == b.nvlink`;
+a pool is an ordinary device, claimed in the same atomic reservation as the
+cards that draw from it. None of these needs hierarchy in the ledger.
+
+**4. Lenient parsing.** `int(obj.get(key, 0))` accepts `-1`, `"5"`, and `2.7`,
+turns `null` into a `TypeError`, and a negative allocation would increase
+availability on grant. *Rule:* an omitted resource is 0 and that is backward
+compatible; a present value must be a non-negative integer; a claim on a
+resource the device does not declare is rejected.
+
+**5. Where strategy lives.** Some callers need several reservations granted
+together or not at all (a base model and its LoRA on separate leases); others
+want whichever of a set fits now (ten voices for a book render). Both tempt a
+smarter daemon with partial grants. *Rule:* the daemon stays all-or-nothing
+over whatever list it receives. The solver decides the list, and a plan is a
+sequence of atomic requests: required groups together first, then one request
+per optional group, so a lost race drops one voice rather than the book.
+
+**6. The consequence of free names.** Once `kind` is authoritative, a device
+name no longer has to be `cuda:GPU-<uuid>`, so the UUID moves into metadata.
+A worker launched by `reserve` learns its grant only from the environment, so
+it cannot look the UUID up. *Rule:* a grant is the request plus the device's
+immutable metadata. The daemon is the authority for what a worker needs.
 
 ## The model
 
